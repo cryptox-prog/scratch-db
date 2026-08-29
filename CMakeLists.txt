@@ -23,6 +23,9 @@ endif()
 
 # Common Database engine
 add_library(db_engine
+    src/catalog/catalog.cpp
+    src/catalog/column.cpp
+    src/catalog/schema.cpp
     src/storage/page.cpp
     src/storage/table_file.cpp
 )
@@ -53,3 +56,8 @@ add_executable(table_file_tests
 target_link_libraries(table_file_tests PRIVATE db_engine)
 add_test(NAME TableFileTests COMMAND table_file_tests)
 
+add_executable(catalog_tests
+    tests/catalog_test.cpp
+)
+target_link_libraries(catalog_tests PRIVATE db_engine)
+add_test(NAME CatalogTests COMMAND catalog_tests)
