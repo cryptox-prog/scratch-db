@@ -4,6 +4,7 @@
 #include <string>
 
 enum class ColumnType : uint8_t {
+    null_type,
     int32,
     text,
 };

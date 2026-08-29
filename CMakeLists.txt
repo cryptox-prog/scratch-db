@@ -26,6 +26,9 @@ add_library(db_engine
     src/catalog/catalog.cpp
     src/catalog/column.cpp
     src/catalog/schema.cpp
+    src/record/row.cpp
+    src/record/serializer.cpp
+    src/record/value.cpp
     src/storage/page.cpp
     src/storage/table_file.cpp
 )
@@ -61,3 +64,9 @@ add_executable(catalog_tests
 )
 target_link_libraries(catalog_tests PRIVATE db_engine)
 add_test(NAME CatalogTests COMMAND catalog_tests)
+
+add_executable(record_tests
+    tests/record_test.cpp
+)
+target_link_libraries(record_tests PRIVATE db_engine)
+add_test(NAME RecordTests COMMAND record_tests)

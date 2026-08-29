@@ -12,6 +12,10 @@
 /// @exception If invalid column max size
 /// @note Invalid column name has special charecters or space
 Column::Column(std::string name, ColumnType type, bool nullable, uint16_t max_size) {
+    if (type == ColumnType::null_type) {
+        throw std::invalid_argument("null_type cannot be used for a column");
+    }
+
     if (!set_name(name)) {
         throw std::invalid_argument("invalid column name");
     }
@@ -71,6 +75,10 @@ Column Column::from_catalog(
         return text_column(name, nullable, max_size);
     }
 
+    if (type == ColumnType::null_type) {
+        throw std::invalid_argument("null_type cannot be used for a column");
+    }
+
     throw std::invalid_argument("invalid column type");
 }
 
@@ -113,6 +121,10 @@ bool Column::set_name(const std::string& name) {
 /// @brief Setter for the type property
 /// @param type The datatype to for the column
 void Column::set_type(ColumnType type) {
+    if (type == ColumnType::null_type) {
+        return;
+    }
+
     type_ = type;
     if (type_ == ColumnType::int32) {
         max_size_ = fixed_size(ColumnType::int32);
@@ -191,6 +203,8 @@ bool Column::is_valid_name(const std::string& name) {
 /// @return String name of the type
 std::string Column::type_to_string(ColumnType type) {
     switch (type) {
+        case ColumnType::null_type:
+            return "null";
         case ColumnType::int32:
             return "int32";
         case ColumnType::text:
@@ -205,6 +219,11 @@ std::string Column::type_to_string(ColumnType type) {
 /// @param type Output parameter that receives the parsed type
 /// @return True if the text matched a known column type
 bool Column::type_from_string(const std::string& text, ColumnType& type) {
+    if (text == "null") {
+        type = ColumnType::null_type;
+        return true;
+    }
+
     if (text == "int32") {
         type = ColumnType::int32;
         return true;
@@ -223,6 +242,8 @@ bool Column::type_from_string(const std::string& text, ColumnType& type) {
 /// @return Fixed byte size, or VARIABLE_SIZE for variable size types
 uint16_t Column::fixed_size(ColumnType type) {
     switch (type) {
+        case ColumnType::null_type:
+            return VARIABLE_SIZE;
         case ColumnType::int32:
             return INT32_SIZE;
         case ColumnType::text:

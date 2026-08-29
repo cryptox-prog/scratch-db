@@ -12,3 +12,7 @@ namespace BYTE_SIZES {
     constexpr uint16_t OFFSET = 2;
     constexpr uint16_t LENGTH = 2;
 }
+
+namespace LIMITS {
+    constexpr uint16_t MAX_COLUMNS = 991;
+}

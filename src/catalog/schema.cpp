@@ -1,14 +1,15 @@
 #include "catalog/schema.hpp"
 
-#include <limits>
 #include <stdexcept>
+
+#include "common/constants.hpp"
 
 namespace {
     /// @brief Check if schema has valid columns
     /// @param columns The vector of columns in the schema
     /// @return False if invalid columns or invalid column combination
     bool are_valid_columns(const std::vector<Column>& columns) {
-        if (columns.empty() || columns.size() > std::numeric_limits<uint16_t>::max()) {
+        if (columns.empty() || columns.size() > LIMITS::MAX_COLUMNS) {
             return false;
         }
 

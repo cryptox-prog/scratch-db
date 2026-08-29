@@ -1,0 +1,104 @@
+#include "record/serializer.hpp"
+#include "test_utils.hpp"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace {
+
+Schema student_schema() {
+    return Schema("student", {
+        Column::int32_column("id", false),
+        Column::text_column("name", false, 128),
+        Column::text_column("nickname", true, 64),
+    });
+}
+
+void serialize_round_trip() {
+    const Schema schema = student_schema();
+    const Row row({
+        Value::int32_value(42),
+        Value::text_value("alice"),
+        Value::text_value("ally"),
+    });
+
+    std::vector<uint8_t> record;
+    require(RecordSerializer::serialize(schema, row, record), "serialize failed");
+
+    Row decoded;
+    require(RecordSerializer::deserialize(schema, record, decoded), "deserialize failed");
+    require(decoded.value_count() == 3, "bad value count");
+    require(decoded.value(0)->int32_data() == 42, "bad int32 value");
+    require(decoded.value(1)->text_data() == "alice", "bad text value");
+    require(decoded.value(2)->text_data() == "ally", "bad nullable text value");
+}
+
+void serialize_null_value() {
+    require(Value::null_value().type() == ColumnType::null_type, "null value has wrong type");
+
+    const Schema schema = student_schema();
+    const Row row({
+        Value::int32_value(7),
+        Value::text_value("bob"),
+        Value::null_value(),
+    });
+
+    std::vector<uint8_t> record;
+    require(RecordSerializer::serialize(schema, row, record), "serialize null failed");
+    require((record[0] & static_cast<uint8_t>(1u << 2)) != 0, "null bit not set");
+
+    Row decoded;
+    require(RecordSerializer::deserialize(schema, record, decoded), "deserialize null failed");
+    require(decoded.value(2)->is_null(), "null value not preserved");
+}
+
+void reject_bad_values() {
+    const Schema schema = student_schema();
+    std::vector<uint8_t> record;
+
+    require(!RecordSerializer::serialize(schema, Row({
+        Value::text_value("wrong"),
+        Value::text_value("alice"),
+        Value::null_value(),
+    }), record), "wrong type accepted");
+}
+
+void reject_text_too_large() {
+    const Schema schema("tiny", {
+        Column::text_column("name", false, 3),
+    });
+
+    std::vector<uint8_t> record;
+    require(!RecordSerializer::serialize(schema, Row({
+        Value::text_value("toolong"),
+    }), record), "too-large text accepted");
+}
+
+void reject_malformed_record() {
+    const Schema schema = student_schema();
+    const std::vector<uint8_t> record = {0};
+
+    Row row;
+    require(!RecordSerializer::deserialize(schema, record, row), "malformed record accepted");
+}
+
+}  // namespace
+
+int main() {
+    std::vector<TestCase> tests;
+    tests.push_back({"record round trip", serialize_round_trip});
+    tests.push_back({"record null", serialize_null_value});
+    tests.push_back({"record bad values", reject_bad_values});
+    tests.push_back({"record text size", reject_text_too_large});
+    tests.push_back({"record malformed", reject_malformed_record});
+
+    TestSummary summary;
+    print_test_header();
+    for (std::size_t i = 0; i < tests.size(); ++i) {
+        run_test_row(static_cast<int>(i + 1), tests[i], summary);
+    }
+    print_test_footer(summary);
+
+    return summary.failed == 0 ? 0 : 1;
+}

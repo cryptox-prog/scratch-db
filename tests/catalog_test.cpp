@@ -1,4 +1,5 @@
 #include "catalog/catalog.hpp"
+#include "common/constants.hpp"
 #include "test_utils.hpp"
 
 #include <filesystem>
@@ -13,7 +14,8 @@ std::filesystem::path temp_path(const std::string& name) {
     return std::filesystem::path("/tmp") / ("scratch_db_catalog_" + name);
 }
 
-bool throws_invalid_argument(void (*fn)()) {
+template <typename Fn>
+bool throws_invalid_argument(Fn fn) {
     try {
         fn();
     } catch (const std::invalid_argument&) {
@@ -27,8 +29,10 @@ void column_type_round_trip() {
     ColumnType type = ColumnType::text;
     require(Column::type_to_string(ColumnType::int32) == "int32", "bad int32 text");
     require(Column::type_to_string(ColumnType::text) == "text", "bad text text");
+    require(Column::type_to_string(ColumnType::null_type) == "null", "bad null text");
     require(Column::type_from_string("int32", type) && type == ColumnType::int32, "bad int32 parse");
     require(Column::type_from_string("text", type) && type == ColumnType::text, "bad text parse");
+    require(Column::type_from_string("null", type) && type == ColumnType::null_type, "bad null parse");
     require(!Column::type_from_string("float", type), "invalid type parsed");
 }
 
@@ -47,6 +51,10 @@ void column_domain_sizes() {
     require(throws_invalid_argument([]() {
         Column::from_catalog("id", ColumnType::int32, false, 8);
     }), "catalog accepted bad int32 size");
+
+    require(throws_invalid_argument([]() {
+        Column::from_catalog("nothing", ColumnType::null_type, true, 0);
+    }), "catalog accepted null column type");
 
     require(throws_invalid_argument([]() {
         Column::text_column("bio", true, static_cast<uint16_t>(Column::TEXT_MAX_SIZE + 1));
@@ -116,6 +124,23 @@ void schema_lookup_and_validation() {
     }), "bad column name accepted");
 }
 
+void schema_column_limit() {
+    std::vector<Column> columns;
+    columns.reserve(static_cast<std::size_t>(LIMITS::MAX_COLUMNS) + 1);
+
+    for (uint16_t i = 0; i <= LIMITS::MAX_COLUMNS; ++i) {
+        columns.push_back(Column::int32_column("c_" + std::to_string(i), true));
+    }
+
+    require(throws_invalid_argument([&columns]() {
+        Schema("too_wide", columns);
+    }), "schema accepted too many columns");
+
+    columns.pop_back();
+    Schema schema("wide", columns);
+    require(schema.column_count() == LIMITS::MAX_COLUMNS, "schema rejected max column count");
+}
+
 void catalog_create_and_load() {
     const std::filesystem::path root = temp_path("create_and_load");
     std::filesystem::remove_all(root);
@@ -177,6 +202,7 @@ void add_catalog_tests(std::vector<TestCase>& tests) {
     tests.push_back({"column sizes", column_domain_sizes});
     tests.push_back({"column validation", column_validation});
     tests.push_back({"schema lookup", schema_lookup_and_validation});
+    tests.push_back({"schema column limit", schema_column_limit});
     tests.push_back({"catalog create/load", catalog_create_and_load});
     tests.push_back({"catalog lists", catalog_lists_names});
 }
