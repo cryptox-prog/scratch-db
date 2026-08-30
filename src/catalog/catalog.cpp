@@ -26,7 +26,9 @@ namespace {
                 << column.name() << ' '
                 << Column::type_to_string(column.type()) << ' '
                 << (column.nullable() ? 1 : 0) << ' '
-                << column.max_size() << '\n'
+                << column.max_size() << ' '
+                << static_cast<int>(column.precision()) << ' '
+                << static_cast<int>(column.scale()) << '\n'
             ;
         }
 
@@ -43,14 +45,28 @@ namespace {
             return std::nullopt;
         }
 
+        std::string line;
         std::string word;
         std::string table_name;
-        if (!(in >> word >> table_name) || word != "table") {
+        if (!std::getline(in, line)) {
+            return std::nullopt;
+        }
+
+        std::istringstream table_line(line);
+        if (!(table_line >> word >> table_name) || word != "table") {
             return std::nullopt;
         }
 
         std::vector<Column> columns;
-        while (in >> word) {
+        while (std::getline(in, line)) {
+            if (line.empty()) {
+                continue;
+            }
+
+            std::istringstream column_line(line);
+            if (!(column_line >> word)) {
+                return std::nullopt;
+            }
             if (word != "column") {
                 return std::nullopt;
             }
@@ -59,8 +75,15 @@ namespace {
             std::string type_text;
             int nullable = 0;
             uint16_t max_size = 0;
-            if (!(in >> column_name >> type_text >> nullable >> max_size)) {
+            int precision = 0;
+            int scale = 0;
+            if (!(column_line >> column_name >> type_text >> nullable >> max_size)) {
                 return std::nullopt;
+            }
+            if (column_line >> precision) {
+                if (!(column_line >> scale)) {
+                    return std::nullopt;
+                }
             }
 
             ColumnType type;
@@ -73,7 +96,9 @@ namespace {
                     column_name,
                     type,
                     nullable != 0,
-                    max_size
+                    max_size,
+                    static_cast<uint8_t>(precision),
+                    static_cast<uint8_t>(scale)
                 ));
             } catch (const std::invalid_argument&) {
                 return std::nullopt;

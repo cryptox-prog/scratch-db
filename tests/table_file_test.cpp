@@ -85,6 +85,24 @@ void relocate_growing_update() {
     std::remove(path.c_str());
 }
 
+void scan_skips_deleted_records() {
+    const std::filesystem::path path = temp_path("scan");
+    std::remove(path.c_str());
+    TableFile table(path);
+
+    const RecordId first = table.insert_record(bytes(1, 20));
+    const RecordId second = table.insert_record(bytes(2, 20));
+    const RecordId third = table.insert_record(bytes(3, 20));
+    require(table.delete_record(second), "delete before scan failed");
+
+    const auto records = table.scan_records();
+    require(records.size() == 2, "scan returned wrong record count");
+    require(records[0].first.page_id == first.page_id && records[0].first.slot_id == first.slot_id, "first scan id wrong");
+    require(records[1].first.page_id == third.page_id && records[1].first.slot_id == third.slot_id, "third scan id wrong");
+
+    std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -92,5 +110,6 @@ int main() {
     tests.push_back({"table pages/reopen", multiple_pages_and_reopen});
     tests.push_back({"table record id ops", delete_and_update_by_record_id});
     tests.push_back({"table relocate", relocate_growing_update});
+    tests.push_back({"table scan", scan_skips_deleted_records});
     return run_tests(tests);
 }

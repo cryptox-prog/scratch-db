@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <utility>
 #include <vector>
 
 #include "common/types.hpp"
@@ -18,6 +20,8 @@ public:
 
     RecordId insert_record(const std::vector<uint8_t>& record);
     bool read_record(RecordId record_id, std::vector<uint8_t>& record) const;
+    bool scan_records(const std::function<bool(RecordId, const std::vector<uint8_t>&)>& callback) const;
+    std::vector<std::pair<RecordId, std::vector<uint8_t>>> scan_records() const;
     bool delete_record(RecordId record_id);
     bool update_record(RecordId& record_id, const std::vector<uint8_t>& record);
 

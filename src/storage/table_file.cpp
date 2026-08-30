@@ -199,6 +199,41 @@ bool TableFile::read_record(RecordId record_id, std::vector<uint8_t>& record) co
     return read_page(record_id.page_id, page) && page.read(record_id.slot_id, record);
 }
 
+/// @brief Scan all readable records in the table file
+/// @param callback Called once for each readable record. Return false to stop scanning early.
+/// @return False if the callback stops the scan, true if the full table file is scanned
+bool TableFile::scan_records(const std::function<bool(RecordId, const std::vector<uint8_t>&)>& callback) const {
+    const uint32_t pages = page_count();
+    for (uint32_t page_id = 0; page_id < pages; ++page_id) {
+        Page page;
+        if (!read_page(page_id, page)) {
+            continue;
+        }
+
+        for (uint16_t slot_id = 0; slot_id < page.slot_count(); ++slot_id) {
+            std::vector<uint8_t> record;
+            if (page.read(slot_id, record)) {
+                if (!callback(RecordId{page_id, slot_id}, record)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+/// @brief Scan all readable records in the table file
+/// @return Pairs of record ids and record bytes, skipping deleted slots and unreadable pages
+std::vector<std::pair<RecordId, std::vector<uint8_t>>> TableFile::scan_records() const {
+    std::vector<std::pair<RecordId, std::vector<uint8_t>>> records;
+    scan_records([&records](RecordId record_id, const std::vector<uint8_t>& record) {
+        records.push_back({record_id, record});
+        return true;
+    });
+    return records;
+}
+
 /// @brief Delete a given record from its page and write the new page
 /// @param record_id The page_id followed by slot_id
 /// @return False if reading page, removing page or wrting new page fails True otherwise

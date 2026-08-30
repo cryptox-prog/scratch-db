@@ -23,9 +23,15 @@ endif()
 
 # Common Database engine
 add_library(db_engine
+    src/cli/table_printer.cpp
     src/catalog/catalog.cpp
     src/catalog/column.cpp
     src/catalog/schema.cpp
+    src/database/database.cpp
+    src/db_types/date_time.cpp
+    src/query/query_executor.cpp
+    src/query/query_parser.cpp
+    src/query/value_parser.cpp
     src/record/row.cpp
     src/record/serializer.cpp
     src/record/value.cpp
@@ -70,3 +76,39 @@ add_executable(record_tests
 )
 target_link_libraries(record_tests PRIVATE db_engine)
 add_test(NAME RecordTests COMMAND record_tests)
+
+add_executable(database_tests
+    tests/database_test.cpp
+)
+target_link_libraries(database_tests PRIVATE db_engine)
+add_test(NAME DatabaseTests COMMAND database_tests)
+
+add_executable(db_types_tests
+    tests/db_types_test.cpp
+)
+target_link_libraries(db_types_tests PRIVATE db_engine)
+add_test(NAME DbTypesTests COMMAND db_types_tests)
+
+add_executable(query_parser_tests
+    tests/query_parser_test.cpp
+)
+target_link_libraries(query_parser_tests PRIVATE db_engine)
+add_test(NAME QueryParserTests COMMAND query_parser_tests)
+
+add_executable(value_parser_tests
+    tests/value_parser_test.cpp
+)
+target_link_libraries(value_parser_tests PRIVATE db_engine)
+add_test(NAME ValueParserTests COMMAND value_parser_tests)
+
+add_executable(query_executor_tests
+    tests/query_executor_test.cpp
+)
+target_link_libraries(query_executor_tests PRIVATE db_engine)
+add_test(NAME QueryExecutorTests COMMAND query_executor_tests)
+
+add_executable(table_printer_tests
+    tests/table_printer_test.cpp
+)
+target_link_libraries(table_printer_tests PRIVATE db_engine)
+add_test(NAME TablePrinterTests COMMAND table_printer_tests)

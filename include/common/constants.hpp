@@ -15,4 +15,5 @@ namespace BYTE_SIZES {
 
 namespace LIMITS {
     constexpr uint16_t MAX_COLUMNS = 991;
+    constexpr uint8_t MAX_NUMBER_PRECISION = 18;
 }
