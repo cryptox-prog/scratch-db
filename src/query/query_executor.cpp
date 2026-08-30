@@ -14,6 +14,8 @@
 #include "query/value_parser.hpp"
 
 namespace {
+    int compare_values(const Value& left, const Value& right);
+
     QueryResult message_result(const std::string& message) {
         QueryResult result;
         result.metadata.message = message;
@@ -192,6 +194,203 @@ namespace {
         return false;
     }
 
+    std::optional<Value> row_value_for_column(const Schema& schema, const std::vector<Value>& row_values, const std::string& column_name) {
+        const int index = schema.column_index(column_name);
+        if (index < 0 || static_cast<std::size_t>(index) >= row_values.size()) {
+            return std::nullopt;
+        }
+        return row_values[static_cast<std::size_t>(index)];
+    }
+
+    bool compare_constraint_operator(const Value& left, const Value& right, QueryOperator op) {
+        const int comparison = compare_values(left, right);
+        if (op == QueryOperator::equal) {
+            return comparison == 0;
+        }
+        if (op == QueryOperator::not_equal) {
+            return comparison != 0;
+        }
+        if (op == QueryOperator::greater) {
+            return comparison > 0;
+        }
+        if (op == QueryOperator::less) {
+            return comparison < 0;
+        }
+        if (op == QueryOperator::greater_equal) {
+            return comparison >= 0;
+        }
+        if (op == QueryOperator::less_equal) {
+            return comparison <= 0;
+        }
+        return false;
+    }
+
+    bool row_satisfies_check_constraint(const Schema& schema, const std::vector<Value>& row_values, const ConstraintDefinition& constraint, QueryResult& error) {
+        if (constraint.kind != "check" || constraint.args.size() < 3) {
+            error = QueryResult{};
+            return true;
+        }
+
+        const std::string& column_name = constraint.args[0];
+        const std::string& op_text = constraint.args[1];
+        const std::string& target_text = constraint.args[2];
+
+        QueryOperator op = QueryOperator::equal;
+        if (op_text == ">") {
+            op = QueryOperator::greater;
+        } else if (op_text == "<") {
+            op = QueryOperator::less;
+        } else if (op_text == ">=") {
+            op = QueryOperator::greater_equal;
+        } else if (op_text == "<=") {
+            op = QueryOperator::less_equal;
+        } else if (op_text == "!=") {
+            op = QueryOperator::not_equal;
+        } else if (op_text == "=") {
+            op = QueryOperator::equal;
+        } else {
+            error = error_result("unsupported check operator", op_text, "CHECK", 0);
+            return false;
+        }
+
+        std::optional<Value> left_value = row_value_for_column(schema, row_values, column_name);
+        if (!left_value.has_value()) {
+            error = error_result("unknown check column", column_name, "CHECK", 0);
+            return false;
+        }
+
+        Value right_value = Value::null_value();
+        const int target_index = schema.column_index(target_text);
+        if (target_index >= 0 && static_cast<std::size_t>(target_index) < row_values.size()) {
+            right_value = row_values[static_cast<std::size_t>(target_index)];
+        } else {
+            const Column* literal_column = schema.find_column(column_name);
+            if (literal_column == nullptr) {
+                error = error_result("unknown check column", column_name, "CHECK", 0);
+                return false;
+            }
+            ValueParseResult parsed = ValueParser::parse_value_with_error(*literal_column, target_text, 0);
+            if (!parsed.ok() || !parsed.value.has_value()) {
+                error = value_error_result(*parsed.error, "CHECK");
+                return false;
+            }
+            right_value = *parsed.value;
+        }
+
+        if (!compare_constraint_operator(*left_value, right_value, op)) {
+            error = error_result("constraint " + std::to_string(constraint.id) + " check violation", column_name, "CHECK", 0);
+            return false;
+        }
+        error = QueryResult{};
+        return true;
+    }
+
+    bool row_satisfies_schema_constraints(const std::string& table_name, const Schema& schema, const std::vector<Value>& row_values, Database* db, std::optional<RecordId> ignore_record_id, QueryResult& error) {
+        for (const ConstraintDefinition& constraint : schema.constraints()) {
+            if (constraint.kind == "primary_key" || constraint.kind == "unique") {
+                bool any_null = false;
+                for (const std::string& column_name : constraint.columns) {
+                    const std::optional<Value> value = row_value_for_column(schema, row_values, column_name);
+                    if (!value.has_value() || value->is_null()) {
+                        any_null = true;
+                    }
+                }
+                if (any_null) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " " + constraint.kind + " violation", constraint.columns.empty() ? table_name : constraint.columns[0], "constraint", 0);
+                    return false;
+                }
+
+                bool found = false;
+                const bool completed = db->scan_rows(table_name, [&schema, &constraint, &row_values, &ignore_record_id, &found](const TableRow& table_row) {
+                    if (ignore_record_id.has_value() && table_row.record_id.page_id == ignore_record_id->page_id && table_row.record_id.slot_id == ignore_record_id->slot_id) {
+                        return true;
+                    }
+                    std::vector<Value> existing_values = table_row.row.values();
+                    bool equal = true;
+                    for (const std::string& column_name : constraint.columns) {
+                        const int index = schema.column_index(column_name);
+                        if (index < 0 || static_cast<std::size_t>(index) >= existing_values.size() || static_cast<std::size_t>(index) >= row_values.size()) {
+                            equal = false;
+                            break;
+                        }
+                        if (compare_values(existing_values[static_cast<std::size_t>(index)], row_values[static_cast<std::size_t>(index)]) != 0) {
+                            equal = false;
+                            break;
+                        }
+                    }
+                    if (equal) {
+                        found = true;
+                        return false;
+                    }
+                    return true;
+                });
+                if (!completed) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " " + constraint.kind + " violation", constraint.columns.empty() ? table_name : constraint.columns[0], "constraint", 0);
+                    return false;
+                }
+                if (found) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " " + constraint.kind + " violation", constraint.columns.empty() ? table_name : constraint.columns[0], "constraint", 0);
+                    return false;
+                }
+            } else if (constraint.kind == "foreign_key") {
+                if (constraint.columns.size() != 1 || constraint.args.size() < 2) {
+                    continue;
+                }
+                const std::string& local_column_name = constraint.columns[0];
+                const std::string& ref_table_name = constraint.args[0];
+                const std::string& ref_column_name = constraint.args[1];
+                const std::optional<Value> local_value = row_value_for_column(schema, row_values, local_column_name);
+                if (!local_value.has_value() || local_value->is_null()) {
+                    continue;
+                }
+                const Column* local_column = schema.find_column(local_column_name);
+                if (local_column == nullptr) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " foreign_key violation", local_column_name, "foreign_key", 0);
+                    return false;
+                }
+                const std::optional<Schema> ref_schema = db->load_schema(ref_table_name);
+                if (!ref_schema.has_value()) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " foreign_key violation", local_column_name, "foreign_key", 0);
+                    return false;
+                }
+                const int ref_index = ref_schema->column_index(ref_column_name);
+                if (ref_index < 0) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " foreign_key violation", local_column_name, "foreign_key", 0);
+                    return false;
+                }
+                const Column* ref_column = ref_schema->find_column(ref_column_name);
+                if (ref_column == nullptr ||
+                    local_column->type() != ref_column->type() ||
+                    local_column->max_size() != ref_column->max_size() ||
+                    local_column->precision() != ref_column->precision() ||
+                    local_column->scale() != ref_column->scale()) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " foreign_key violation", local_column_name, "foreign_key", 0);
+                    return false;
+                }
+                bool matched = false;
+                db->scan_rows(ref_table_name, [&local_value, &matched, ref_index](const TableRow& table_row) {
+                    const Value* value = table_row.row.value(static_cast<uint16_t>(ref_index));
+                    if (value != nullptr && compare_values(*value, *local_value) == 0) {
+                        matched = true;
+                        return false;
+                    }
+                    return true;
+                });
+                if (!matched) {
+                    error = error_result("constraint " + std::to_string(constraint.id) + " foreign_key violation", local_column_name, "foreign_key", 0);
+                    return false;
+                }
+            } else if (constraint.kind == "check") {
+                if (!row_satisfies_check_constraint(schema, row_values, constraint, error)) {
+                    return false;
+                }
+            }
+        }
+
+        error = QueryResult{};
+        return true;
+    }
+
     bool selected_is_grouped(const ParsedQuery& query, const SelectedColumn& selected) {
         for (const SelectedColumn& group_column : query.group_by_columns) {
             if (group_column.column_name == selected.column_name && group_column.table_alias == selected.table_alias) {
@@ -349,8 +548,9 @@ namespace {
         return compare_with_operator(compare_values(*stored_value, *condition_value.value), condition.op);
     }
 
-    bool row_matches_in_subquery(const Schema& schema, const TableRow& table_row, const QueryCondition& condition, QueryResult& error) {
-        const QueryExpression& left = condition.left_expression;
+    bool row_matches_subquery_values(const Schema& schema, const TableRow& table_row, const QueryConditionNode& condition, QueryResult& error) {
+        const QueryCondition& query_condition = condition.condition;
+        const QueryExpression& left = query_condition.left_expression;
         if (left.type != QueryExpressionType::column_reference) {
             error = error_result("expected column", expression_label(left), "", left.position);
             return false;
@@ -368,20 +568,29 @@ namespace {
             return false;
         }
 
-        for (const std::string& value_text : condition.right_values) {
+        bool saw_value = false;
+        bool matched = false;
+        bool all_match = true;
+        for (const std::string& value_text : query_condition.right_values) {
+            saw_value = true;
             ValueParseResult parsed_value = ValueParser::parse_value_with_error(*column, quote_scalar_if_needed({column->name(), Column::type_to_string(column->type())}, value_text), left.position);
             if (!parsed_value.ok() || !parsed_value.value.has_value()) {
                 error = value_error_result(*parsed_value.error, "");
                 return false;
             }
-            if (compare_values(*stored_value, *parsed_value.value) == 0) {
-                error = QueryResult{};
-                return true;
-            }
+            const int comparison = compare_values(*stored_value, *parsed_value.value);
+            const bool comparison_match = condition.type == QueryConditionNodeType::in_subquery ?
+                comparison == 0 :
+                compare_with_operator(comparison, query_condition.op);
+            matched = matched || comparison_match;
+            all_match = all_match && comparison_match;
         }
 
         error = QueryResult{};
-        return false;
+        if (condition.type == QueryConditionNodeType::all_subquery) {
+            return !saw_value || all_match;
+        }
+        return matched;
     }
 
     bool row_matches_condition(const Schema& schema, const TableRow& table_row, const QueryConditionNode* condition, QueryResult& error) {
@@ -393,7 +602,7 @@ namespace {
             return row_matches(schema, table_row, condition->condition, error);
         }
         if (condition->type == QueryConditionNodeType::in_subquery || condition->type == QueryConditionNodeType::any_subquery || condition->type == QueryConditionNodeType::all_subquery) {
-            return row_matches_in_subquery(schema, table_row, condition->condition, error);
+            return row_matches_subquery_values(schema, table_row, *condition, error);
         }
         if (condition->type == QueryConditionNodeType::exists_subquery) {
             error = QueryResult{};
@@ -1323,7 +1532,7 @@ QueryResult QueryExecutor::execute_parsed(const ParsedQuery& query) {
         case QueryType::use_database:
             return use_database(query.database_name);
         case QueryType::create_table:
-            return create_table(query.table_name, query.columns);
+            return create_table(query.table_name, query.columns, query.constraints);
         case QueryType::describe_table:
             return describe_table(query.table_name);
         case QueryType::insert_row:
@@ -1417,7 +1626,7 @@ QueryResult QueryExecutor::show_tables() {
     return result;
 }
 
-QueryResult QueryExecutor::create_table(const std::string& table_name, const std::vector<Column>& columns) {
+QueryResult QueryExecutor::create_table(const std::string& table_name, const std::vector<Column>& columns, const std::vector<ConstraintDefinition>& constraints) {
     Database* db = database();
     if (db == nullptr) {
         return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
@@ -1427,7 +1636,7 @@ QueryResult QueryExecutor::create_table(const std::string& table_name, const std
         if (db->table_exists(table_name)) {
             return error_result("table already exists", table_name, current_command_, token_position(current_command_, table_name));
         }
-        if (!db->create_table(Schema(table_name, columns))) {
+        if (!db->create_table(Schema(table_name, columns, constraints))) {
             return error_result("could not create table", table_name, current_command_, token_position(current_command_, table_name));
         }
     } catch (const std::exception& error) {
@@ -1586,6 +1795,15 @@ QueryResult QueryExecutor::insert_row(const std::string& table_name, const std::
         ValueParseResult row = ValueParser::parse_row_with_error(*schema, ordered_values, values_position);
         if (!row.ok() || !row.row.has_value()) {
             return value_error_result(*row.error, current_command_);
+        }
+
+        QueryResult constraint_error;
+        if (!row_satisfies_schema_constraints(table_name, *schema, row.row->values(), db, std::nullopt, constraint_error)) {
+            if (constraint_error.ok()) {
+                return error_result("constraint violation", table_name, current_command_, token_position(current_command_, table_name));
+            }
+            constraint_error.error->source = current_command_;
+            return constraint_error;
         }
 
         std::optional<RecordId> record_id = db->insert_row(table_name, *row.row);
@@ -1747,7 +1965,9 @@ QueryResult QueryExecutor::resolve_subqueries(QueryConditionNode* condition, con
         condition->condition.right_expression.subquery.reset();
         return QueryResult{};
     }
-    if (condition->type == QueryConditionNodeType::in_subquery) {
+    if (condition->type == QueryConditionNodeType::in_subquery ||
+        condition->type == QueryConditionNodeType::any_subquery ||
+        condition->type == QueryConditionNodeType::all_subquery) {
         if (condition->condition.right_expression.subquery == nullptr) {
             return QueryResult{};
         }
@@ -1756,7 +1976,7 @@ QueryResult QueryExecutor::resolve_subqueries(QueryConditionNode* condition, con
             return result;
         }
         if (result.columns.size() != 1) {
-            return error_result("IN subquery must return one column", "SELECT", current_command_, token_position(current_command_, "SELECT"));
+            return error_result("subquery must return one column", "SELECT", current_command_, token_position(current_command_, "SELECT"));
         }
         condition->condition.right_values.clear();
         for (const std::vector<std::string>& row : result.rows) {
@@ -2018,8 +2238,13 @@ QueryResult QueryExecutor::update_row(const std::string& table_name, const std::
         }
 
         RecordId record_id = table_row.record_id;
-        if (matches && db->update_row(table_name, record_id, *row.row)) {
-            ++updated;
+        if (matches) {
+            if (!row_satisfies_schema_constraints(table_name, *schema, row.row->values(), db, record_id, condition_error)) {
+                return false;
+            }
+            if (db->update_row(table_name, record_id, *row.row)) {
+                ++updated;
+            }
         }
         return true;
     });
@@ -2080,6 +2305,9 @@ QueryResult QueryExecutor::update_row(const std::string& table_name, const std::
         }
 
         RecordId record_id = table_row.record_id;
+        if (!row_satisfies_schema_constraints(table_name, *schema, values, db, record_id, condition_error)) {
+            return false;
+        }
         if (db->update_row(table_name, record_id, Row(values))) {
             ++updated;
         }

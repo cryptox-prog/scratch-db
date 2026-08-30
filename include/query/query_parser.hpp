@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstdint>
 
-#include "catalog/column.hpp"
+#include "catalog/schema.hpp"
 
 enum class QueryType {
     exit,
@@ -162,6 +162,7 @@ struct ParsedQuery {
     std::string table_alias;
     std::unique_ptr<ParsedQuery> derived_table;
     std::vector<Column> columns;
+    std::vector<ConstraintDefinition> constraints;
     std::vector<std::string> insert_columns;
     std::string values_text;
     std::vector<std::string> insert_value_rows;

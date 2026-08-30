@@ -65,7 +65,7 @@ private:
     QueryResult use_database(const std::string& database_name);
     QueryResult show_databases() const;
     QueryResult show_tables();
-    QueryResult create_table(const std::string& table_name, const std::vector<Column>& columns);
+    QueryResult create_table(const std::string& table_name, const std::vector<Column>& columns, const std::vector<ConstraintDefinition>& constraints = {});
     QueryResult describe_table(const std::string& table_name);
     QueryResult insert_row(const std::string& table_name, const std::string& values_text);
     QueryResult insert_row(const std::string& table_name, const std::vector<std::string>& insert_columns, const std::string& values_text);

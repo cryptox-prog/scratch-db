@@ -27,17 +27,156 @@ namespace {
 
         return true;
     }
+
+    bool is_valid_constraint_name(const std::string& kind) {
+        return kind == "primary_key" || kind == "unique" || kind == "foreign_key" || kind == "check";
+    }
 }  // namespace
+
+ConstraintDefinition ConstraintDefinition::make_primary_key(uint64_t constraint_id, std::vector<std::string> columns) {
+    ConstraintDefinition constraint;
+    constraint.id = constraint_id;
+    constraint.kind = "primary_key";
+    constraint.columns = std::move(columns);
+    return constraint;
+}
+
+ConstraintDefinition ConstraintDefinition::make_unique(uint64_t constraint_id, std::vector<std::string> columns) {
+    ConstraintDefinition constraint;
+    constraint.id = constraint_id;
+    constraint.kind = "unique";
+    constraint.columns = std::move(columns);
+    return constraint;
+}
+
+ConstraintDefinition ConstraintDefinition::make_foreign_key(uint64_t constraint_id, std::vector<std::string> columns, std::string referenced_table, std::string referenced_column) {
+    ConstraintDefinition constraint;
+    constraint.id = constraint_id;
+    constraint.kind = "foreign_key";
+    constraint.columns = std::move(columns);
+    constraint.args = {std::move(referenced_table), std::move(referenced_column)};
+    return constraint;
+}
+
+ConstraintDefinition ConstraintDefinition::make_check(uint64_t constraint_id, std::vector<std::string> expression_parts) {
+    ConstraintDefinition constraint;
+    constraint.id = constraint_id;
+    constraint.kind = "check";
+    constraint.args = std::move(expression_parts);
+    return constraint;
+}
+
+namespace {
+    std::vector<std::string> split_csv(const std::string& text) {
+        std::vector<std::string> parts;
+        if (text.empty()) {
+            return parts;
+        }
+
+        std::string current;
+        for (char ch : text) {
+            if (ch == ',') {
+                if (!current.empty()) {
+                    parts.push_back(current);
+                    current.clear();
+                }
+            } else {
+                current.push_back(ch);
+            }
+        }
+        if (!current.empty()) {
+            parts.push_back(current);
+        }
+        return parts;
+    }
+}  // namespace
+
+std::string ConstraintDefinition::serialized() const {
+    std::string text = std::to_string(id) + "|" + kind;
+    if (!columns.empty()) {
+        text += "|";
+        for (std::size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0) {
+                text += ",";
+            }
+            text += columns[i];
+        }
+    }
+    if (!args.empty()) {
+        text += "|";
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            if (i > 0) {
+                text += ",";
+            }
+            text += args[i];
+        }
+    }
+    return text;
+}
+
+ConstraintDefinition ConstraintDefinition::from_serialized(const std::string& text) {
+    ConstraintDefinition constraint;
+    std::string copied = text;
+    std::size_t first = copied.find('|');
+    if (first == std::string::npos) {
+        return constraint;
+    }
+
+    const std::string id_text = copied.substr(0, first);
+    if (!id_text.empty()) {
+        constraint.id = static_cast<uint64_t>(std::stoull(id_text));
+    }
+
+    std::size_t second = copied.find('|', first + 1);
+    if (second == std::string::npos) {
+        constraint.kind = copied.substr(first + 1);
+        return constraint;
+    }
+
+    constraint.kind = copied.substr(first + 1, second - first - 1);
+    std::string remaining = copied.substr(second + 1);
+
+    std::size_t third = remaining.find('|');
+    if (third == std::string::npos) {
+        if (constraint.kind == "check") {
+            constraint.args = split_csv(remaining);
+        } else {
+            constraint.columns = split_csv(remaining);
+        }
+        return constraint;
+    }
+
+    const std::string columns_text = remaining.substr(0, third);
+    const std::string args_text = remaining.substr(third + 1);
+    if (!columns_text.empty()) {
+        constraint.columns = split_csv(columns_text);
+    }
+    if (!args_text.empty()) {
+        constraint.args = split_csv(args_text);
+    }
+
+    if (constraint.kind == "check" && constraint.columns.empty()) {
+        constraint.args = split_csv(remaining);
+        constraint.columns.clear();
+    }
+
+    return constraint;
+}
 
 /// @brief Constructor for schema
 /// @param table_name The name to set for the table
 /// @param columns The vector of columns for the table
-Schema::Schema(std::string table_name, std::vector<Column> columns) {
+Schema::Schema(std::string table_name, std::vector<Column> columns) : Schema(std::move(table_name), std::move(columns), {}) {}
+
+Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints) {
     if (!set_table_name(table_name)) {
         throw std::invalid_argument("invalid table name");
     }
     if (!set_columns(columns)) {
         throw std::invalid_argument("invalid schema columns");
+    }
+    if (!set_constraints(constraints)) {
+        throw std::invalid_argument("invalid schema constraints");
     }
 }
 
@@ -51,6 +190,10 @@ const std::string& Schema::table_name() const {
 /// @return The constant vector of columns
 const std::vector<Column>& Schema::columns() const {
     return columns_;
+}
+
+const std::vector<ConstraintDefinition>& Schema::constraints() const {
+    return constraints_;
 }
 
 /// @brief The number of columns in the schma
@@ -115,6 +258,55 @@ bool Schema::set_columns(const std::vector<Column>& columns) {
         return false;
     }
     columns_ = columns;
+    return true;
+}
+
+bool Schema::set_constraints(const std::vector<ConstraintDefinition>& constraints) {
+    bool has_primary_key = false;
+    for (std::size_t i = 0; i < constraints.size(); ++i) {
+        const ConstraintDefinition& constraint = constraints[i];
+        if (!is_valid_constraint_name(constraint.kind) || constraint.id == 0) {
+            return false;
+        }
+        for (std::size_t j = i + 1; j < constraints.size(); ++j) {
+            if (constraint.id == constraints[j].id) {
+                return false;
+            }
+        }
+        if (constraint.kind == "primary_key" || constraint.kind == "unique") {
+            if (constraint.columns.empty()) {
+                return false;
+            }
+            if (constraint.kind == "primary_key") {
+                if (has_primary_key) {
+                    return false;
+                }
+                has_primary_key = true;
+            }
+            for (const std::string& column_name : constraint.columns) {
+                if (column_index(column_name) < 0) {
+                    return false;
+                }
+            }
+        }
+        if (constraint.kind == "foreign_key") {
+            if (constraint.columns.size() != 1 || constraint.args.size() != 2 || constraint.args[0].empty() || constraint.args[1].empty()) {
+                return false;
+            }
+            if (column_index(constraint.columns[0]) < 0) {
+                return false;
+            }
+        }
+        if (constraint.kind == "check") {
+            if (constraint.args.size() != 3) {
+                return false;
+            }
+            if (column_index(constraint.args[0]) < 0) {
+                return false;
+            }
+        }
+    }
+    constraints_ = constraints;
     return true;
 }
 

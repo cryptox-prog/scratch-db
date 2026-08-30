@@ -324,6 +324,29 @@ void report_missing_varstring_size() {
     require(result.error->token == "VARSTRING", "wrong varstring size token");
 }
 
+void parse_constraint_syntax() {
+    const std::optional<ParsedQuery> query = QueryParser::parse(
+        "CREATE TABLE items (id INTEGER NOT NULL PRIMARY KEY, category_id INTEGER NOT NULL REFERENCES categories(id), price NUMBER(4, 2) NOT NULL CHECK (price > 0), name VARSTRING(16) UNIQUE)"
+    );
+    require(query.has_value(), "constraint create table did not parse");
+    require(query->constraints.size() == 4, "constraint count wrong");
+    require(query->constraints[0].kind == "primary_key", "primary key kind wrong");
+    require(query->constraints[0].columns[0] == "id", "primary key column wrong");
+    require(query->constraints[1].kind == "foreign_key", "foreign key kind wrong");
+    require(query->constraints[2].kind == "check", "check kind wrong");
+    require(query->constraints[2].args[0] == "price", "check left column wrong");
+    require(query->constraints[3].kind == "unique", "unique kind wrong");
+
+    const std::optional<ParsedQuery> stacked = QueryParser::parse(
+        "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER UNIQUE REFERENCES parents(id) CHECK (parent_id > 0))"
+    );
+    require(stacked.has_value(), "stacked column constraints did not parse");
+    require(stacked->constraints.size() == 4, "stacked column constraint count wrong");
+    require(stacked->constraints[1].kind == "unique", "stacked unique kind wrong");
+    require(stacked->constraints[2].kind == "foreign_key", "stacked foreign key kind wrong");
+    require(stacked->constraints[3].kind == "check", "stacked check kind wrong");
+}
+
 void report_missing_number_format() {
     const ParseResult result = QueryParser::parse_with_error("CREATE TABLE tbk (id INTEGER, price NUMBER)");
     require(!result.ok(), "bare number query accepted");
@@ -351,6 +374,7 @@ int main() {
     tests.push_back({"parser table alias", parse_select_table_alias});
     tests.push_back({"parser join variants", parse_join_variants});
     tests.push_back({"parser qualified select", parse_qualified_select_column});
+    tests.push_back({"parser column alias", parse_column_alias});
     tests.push_back({"parser aggregate and scalar subquery", parse_aggregate_and_scalar_subquery});
     tests.push_back({"parser group by", parse_group_by});
     tests.push_back({"parser in and exists subqueries", parse_in_and_exists_subqueries});
@@ -361,6 +385,7 @@ int main() {
     tests.push_back({"parser invalid table alias", reject_invalid_table_aliases});
     tests.push_back({"parser string size error", report_missing_string_size});
     tests.push_back({"parser varstring size error", report_missing_varstring_size});
+    tests.push_back({"parser constraint syntax", parse_constraint_syntax});
     tests.push_back({"parser number format error", report_missing_number_format});
     return run_tests(tests);
 }

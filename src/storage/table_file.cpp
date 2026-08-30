@@ -261,8 +261,8 @@ bool TableFile::update_record(RecordId& record_id, const std::vector<uint8_t>& r
         return write_page(record_id.page_id, page);
     }
 
-    // If fails try inserting in differnt page
-    // then delete it from its original page
+    // TODO: Once WAL exists, log the insert and delete as one atomic statement.
+    // If this process crashes between those writes, the logical update can duplicate or lose a row.
     RecordId new_record_id;
     try {
         new_record_id = insert_record(record);

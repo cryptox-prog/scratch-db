@@ -217,6 +217,53 @@ void insert_value_error_points_to_literal() {
     require(result.error->message == "invalid NUMBER value for column price", "bad insert value message wrong");
     require(result.error->token == "12.345", "bad insert value token wrong");
     require(result.error->position == 29, "bad insert value position wrong");
+}
+
+void enforce_table_constraints() {
+    const std::filesystem::path root = test_root("query_executor_constraints");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE categories (id INTEGER NOT NULL PRIMARY KEY, name VARSTRING(16) UNIQUE)").ok(), "create categories failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL PRIMARY KEY, category_id INTEGER NOT NULL REFERENCES categories(id), price NUMBER(4, 2) NOT NULL CHECK (price > 0), name VARSTRING(16) UNIQUE)").ok(), "create items failed");
+
+    QueryResult result = executor.execute("INSERT INTO categories VALUES (1, 'tools')");
+    require(result.ok(), "categories insert failed");
+
+    result = executor.execute("INSERT INTO items VALUES (1, 1, 9.99, 'hammer')");
+    require(result.ok(), "valid item insert failed");
+
+    result = executor.execute("INSERT INTO categories VALUES (2, 'garden')");
+    require(result.ok(), "second category insert failed");
+
+    result = executor.execute("INSERT INTO items VALUES (4, 2, 5.25, 'shovel')");
+    require(result.ok(), "second item insert failed");
+
+    result = executor.execute("INSERT INTO items VALUES (1, 1, 4.50, 'saw')");
+    require(!result.ok(), "duplicate primary key accepted");
+    require(result.error->message.find("constraint") != std::string::npos, "constraint error missing");
+
+    result = executor.execute("INSERT INTO items VALUES (2, 99, 2.50, 'drill')");
+    require(!result.ok(), "foreign key violation accepted");
+    require(result.error->message.find("foreign_key") != std::string::npos, "foreign key message missing");
+
+    result = executor.execute("INSERT INTO items VALUES (3, 1, -1.00, 'wrench')");
+    require(!result.ok(), "check constraint accepted");
+    require(result.error->message.find("check") != std::string::npos, "check message missing");
+
+    result = executor.execute("UPDATE items SET name = 'hammer' WHERE id = 4");
+    require(!result.ok(), "update unique constraint accepted");
+    require(result.error->message.find("unique") != std::string::npos, "update unique message missing");
+
+    result = executor.execute("UPDATE items SET price = -2.00 WHERE id = 4");
+    require(!result.ok(), "update check constraint accepted");
+    require(result.error->message.find("check") != std::string::npos, "update check message missing");
+
+    require(executor.execute("CREATE TABLE bad_refs (category_name VARSTRING(16) REFERENCES categories(id))").ok(), "create bad ref table failed");
+    result = executor.execute("INSERT INTO bad_refs VALUES ('tools')");
+    require(!result.ok(), "foreign key type mismatch accepted");
+    require(result.error->message.find("foreign_key") != std::string::npos, "foreign key type mismatch message missing");
 
     std::filesystem::remove_all(root);
 }
@@ -703,6 +750,7 @@ int main() {
     tests.push_back({"executor delete where", delete_where_removes_matching_rows});
     tests.push_back({"executor update where", update_where_changes_matching_rows});
     tests.push_back({"executor insert value error", insert_value_error_points_to_literal});
+    tests.push_back({"executor table constraints", enforce_table_constraints});
     tests.push_back({"executor where value error", where_value_error_points_to_literal});
     tests.push_back({"executor where and or", where_and_or_filters_rows});
     tests.push_back({"executor compound selects", compound_selects_union_and_intersect});
@@ -711,6 +759,7 @@ int main() {
     tests.push_back({"executor column alias", select_column_aliases_and_order_by_alias});
     tests.push_back({"executor group by", group_by_aggregates_rows});
     tests.push_back({"executor in and exists subqueries", in_and_exists_subqueries_execute});
+    tests.push_back({"executor subquery predicates", subquery_predicates_execute});
     tests.push_back({"executor derived table", derived_table_executes});
     tests.push_back({"executor with queries", with_queries_execute});
     tests.push_back({"executor order by", order_by_sorts_results});

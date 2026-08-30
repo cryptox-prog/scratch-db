@@ -31,6 +31,9 @@ namespace {
                 << static_cast<int>(column.scale()) << '\n'
             ;
         }
+        for (const ConstraintDefinition& constraint : schema.constraints()) {
+            out << "constraint " << constraint.serialized() << '\n';
+        }
 
         return static_cast<bool>(out);
     }
@@ -58,55 +61,62 @@ namespace {
         }
 
         std::vector<Column> columns;
+        std::vector<ConstraintDefinition> constraints;
         while (std::getline(in, line)) {
             if (line.empty()) {
                 continue;
             }
 
-            std::istringstream column_line(line);
-            if (!(column_line >> word)) {
+            std::istringstream line_stream(line);
+            if (!(line_stream >> word)) {
                 return std::nullopt;
             }
-            if (word != "column") {
-                return std::nullopt;
-            }
-
-            std::string column_name;
-            std::string type_text;
-            int nullable = 0;
-            uint16_t max_size = 0;
-            int precision = 0;
-            int scale = 0;
-            if (!(column_line >> column_name >> type_text >> nullable >> max_size)) {
-                return std::nullopt;
-            }
-            if (column_line >> precision) {
-                if (!(column_line >> scale)) {
+            if (word == "column") {
+                std::string column_name;
+                std::string type_text;
+                int nullable = 0;
+                uint16_t max_size = 0;
+                int precision = 0;
+                int scale = 0;
+                if (!(line_stream >> column_name >> type_text >> nullable >> max_size)) {
                     return std::nullopt;
                 }
-            }
+                if (line_stream >> precision) {
+                    if (!(line_stream >> scale)) {
+                        return std::nullopt;
+                    }
+                }
 
-            ColumnType type;
-            if (!Column::type_from_string(type_text, type)) {
-                return std::nullopt;
-            }
+                ColumnType type;
+                if (!Column::type_from_string(type_text, type)) {
+                    return std::nullopt;
+                }
 
-            try {
-                columns.push_back(Column::from_catalog(
-                    column_name,
-                    type,
-                    nullable != 0,
-                    max_size,
-                    static_cast<uint8_t>(precision),
-                    static_cast<uint8_t>(scale)
-                ));
-            } catch (const std::invalid_argument&) {
+                try {
+                    columns.push_back(Column::from_catalog(
+                        column_name,
+                        type,
+                        nullable != 0,
+                        max_size,
+                        static_cast<uint8_t>(precision),
+                        static_cast<uint8_t>(scale)
+                    ));
+                } catch (const std::invalid_argument&) {
+                    return std::nullopt;
+                }
+            } else if (word == "constraint") {
+                std::string constraint_text;
+                if (!(line_stream >> constraint_text)) {
+                    return std::nullopt;
+                }
+                constraints.push_back(ConstraintDefinition::from_serialized(constraint_text));
+            } else {
                 return std::nullopt;
             }
         }
 
         try {
-            return Schema(table_name, columns);
+            return Schema(table_name, columns, constraints);
         } catch (const std::invalid_argument&) {
             return std::nullopt;
         }
