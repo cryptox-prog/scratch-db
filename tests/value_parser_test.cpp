@@ -28,12 +28,33 @@ void parse_valid_row() {
 
 void reject_bad_number_scale() {
     const Schema schema = make_schema();
-    require(!ValueParser::parse_row(schema, "1, 12.345, '2026-08-30', NULL").has_value(), "bad scale accepted");
+    const ValueParseResult result = ValueParser::parse_row_with_error(schema, "1, 12.345, '2026-08-30', NULL");
+    require(!result.ok(), "bad scale accepted");
+    require(result.error->message == "invalid NUMBER value for column price", "bad scale error message wrong");
+    require(result.error->token == "12.345", "bad scale token wrong");
 }
 
 void reject_unquoted_date() {
     const Schema schema = make_schema();
-    require(!ValueParser::parse_row(schema, "1, 12.34, 2026-08-30, NULL").has_value(), "unquoted date accepted");
+    const ValueParseResult result = ValueParser::parse_row_with_error(schema, "1, 12.34, 2026-08-30, NULL");
+    require(!result.ok(), "unquoted date accepted");
+    require(result.error->message == "date value for column sold_on must be quoted", "unquoted date error message wrong");
+    require(result.error->token == "2026-08-30", "unquoted date token wrong");
+}
+
+void reject_null_not_null_column() {
+    const Schema schema = make_schema();
+    const ValueParseResult result = ValueParser::parse_row_with_error(schema, "1, NULL, '2026-08-30', NULL");
+    require(!result.ok(), "null in not null column accepted");
+    require(result.error->message == "NULL is not allowed for column price", "null error message wrong");
+    require(result.error->token == "NULL", "null token wrong");
+}
+
+void reject_wrong_value_count() {
+    const Schema schema = make_schema();
+    const ValueParseResult result = ValueParser::parse_row_with_error(schema, "1, 12.34");
+    require(!result.ok(), "wrong value count accepted");
+    require(result.error->message == "wrong value count: expected 4, got 2", "value count error message wrong");
 }
 
 void format_values() {
@@ -51,6 +72,8 @@ int main() {
     tests.push_back({"value parser valid row", parse_valid_row});
     tests.push_back({"value parser number scale", reject_bad_number_scale});
     tests.push_back({"value parser quoted date", reject_unquoted_date});
+    tests.push_back({"value parser nullability", reject_null_not_null_column});
+    tests.push_back({"value parser count", reject_wrong_value_count});
     tests.push_back({"value parser format", format_values});
     return run_tests(tests);
 }

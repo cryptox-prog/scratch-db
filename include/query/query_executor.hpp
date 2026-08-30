@@ -1,8 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,8 @@ struct QueryResult {
     std::vector<std::vector<std::string>> rows;
     QueryResultMetadata metadata;
     std::optional<QueryError> error;
+    std::map<std::string, std::size_t> column_positions;
+    std::set<std::string> ambiguous_columns;
     bool should_exit = false;
 
     bool ok() const;
@@ -47,6 +51,15 @@ private:
     Database* database();
     void select_database(const std::string& database_name);
     QueryResult execute_parsed(const ParsedQuery& query);
+    QueryResult execute_join(const ParsedQuery& query);
+    QueryResult execute_select(const ParsedQuery& query);
+    QueryResult execute_row_source(const ParsedQuery& query);
+    QueryResult execute_select_chain(const ParsedQuery& query);
+    QueryResult resolve_subqueries(QueryConditionNode* condition);
+    QueryResult resolve_subqueries(QueryConditionNode* condition, const QueryResult* outer_result, const std::vector<std::string>* outer_row);
+    QueryResult scalar_subquery_value(const ParsedQuery& query, std::string& value_text);
+    QueryResult scalar_subquery_value(const ParsedQuery& query, const QueryResult* outer_result, const std::vector<std::string>* outer_row, std::string& value_text);
+    QueryResult execute_select_chain(const ParsedQuery& query, const QueryResult* outer_result, const std::vector<std::string>* outer_row);
     QueryResult help() const;
     QueryResult create_database(const std::string& database_name);
     QueryResult use_database(const std::string& database_name);
@@ -55,9 +68,12 @@ private:
     QueryResult create_table(const std::string& table_name, const std::vector<Column>& columns);
     QueryResult describe_table(const std::string& table_name);
     QueryResult insert_row(const std::string& table_name, const std::string& values_text);
-    QueryResult select_all(const std::string& table_name, const std::optional<QueryCondition>& condition);
-    QueryResult delete_row(const std::string& table_name, const std::optional<QueryCondition>& condition);
-    QueryResult update_row(const std::string& table_name, const std::string& values_text, const std::optional<QueryCondition>& condition);
+    QueryResult insert_row(const std::string& table_name, const std::vector<std::string>& insert_columns, const std::string& values_text);
+    QueryResult insert_row(const std::string& table_name, const std::vector<std::string>& insert_columns, const std::vector<std::string>& values_rows);
+    QueryResult select_all(const std::string& table_name, const std::string& table_alias, const QueryConditionNode* condition);
+    QueryResult delete_row(const std::string& table_name, const QueryConditionNode* condition);
+    QueryResult update_row(const std::string& table_name, const std::string& values_text, const QueryConditionNode* condition);
+    QueryResult update_row(const std::string& table_name, const std::vector<std::pair<std::string, std::string>>& assignments, const QueryConditionNode* condition);
 
     std::filesystem::path data_root_;
     std::string current_command_;
