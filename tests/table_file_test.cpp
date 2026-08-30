@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -103,6 +104,68 @@ void scan_skips_deleted_records() {
     std::remove(path.c_str());
 }
 
+void flush_makes_cached_write_visible() {
+    const std::filesystem::path path = temp_path("flush_visible");
+    std::remove(path.c_str());
+
+    RecordId record_id;
+    const auto updated = bytes(8, 60);
+    {
+        TableFile table(path);
+        record_id = table.insert_record(bytes(1, 60));
+        require(table.update_record(record_id, updated), "update before flush failed");
+        require(table.flush(), "flush failed");
+
+        TableFile second_handle(path);
+        std::vector<uint8_t> out;
+        require(second_handle.read_record(record_id, out) && out == updated, "flushed write not visible");
+    }
+
+    std::remove(path.c_str());
+}
+
+void sync_flushes_and_syncs_file() {
+    const std::filesystem::path path = temp_path("sync");
+    std::remove(path.c_str());
+
+    TableFile table(path);
+    table.insert_record(bytes(3, 40));
+    require(table.sync(), "sync failed");
+
+    std::remove(path.c_str());
+}
+
+void concurrent_inserts_are_serialized() {
+    const std::filesystem::path path = temp_path("concurrent_insert");
+    std::remove(path.c_str());
+
+    constexpr int THREAD_COUNT = 4;
+    constexpr int RECORDS_PER_THREAD = 50;
+    TableFile table(path);
+
+    std::vector<std::thread> threads;
+    for (int thread_id = 0; thread_id < THREAD_COUNT; ++thread_id) {
+        threads.emplace_back([&table, thread_id]() {
+            for (int i = 0; i < RECORDS_PER_THREAD; ++i) {
+                table.insert_record(bytes(static_cast<uint8_t>(thread_id * 10 + i), 32));
+            }
+        });
+    }
+
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+
+    std::size_t count = 0;
+    require(table.scan_records([&count](RecordId, const std::vector<uint8_t>&) {
+        ++count;
+        return true;
+    }), "scan after concurrent insert failed");
+    require(count == THREAD_COUNT * RECORDS_PER_THREAD, "concurrent insert lost records");
+
+    std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -111,5 +174,8 @@ int main() {
     tests.push_back({"table record id ops", delete_and_update_by_record_id});
     tests.push_back({"table relocate", relocate_growing_update});
     tests.push_back({"table scan", scan_skips_deleted_records});
+    tests.push_back({"table flush", flush_makes_cached_write_visible});
+    tests.push_back({"table sync", sync_flushes_and_syncs_file});
+    tests.push_back({"table concurrent insert", concurrent_inserts_are_serialized});
     return run_tests(tests);
 }

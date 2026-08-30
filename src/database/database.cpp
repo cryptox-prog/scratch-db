@@ -1,5 +1,6 @@
 #include "database/database.hpp"
 
+#include <sstream>
 #include <stdexcept>
 
 #include "record/serializer.hpp"
@@ -9,7 +10,7 @@
 /// @param data_root The root folder where all databases are stored
 /// @param database_name The selected database name for table operations
 Database::Database(const std::filesystem::path& data_root, std::string database_name)
-    : catalog_(data_root), database_name_(std::move(database_name)) {}
+    : data_root_(data_root), catalog_(data_root), database_name_(std::move(database_name)) {}
 
 /// @brief Create the selected database
 /// @return False if the database name is invalid or already exists
@@ -33,7 +34,22 @@ std::vector<std::string> Database::list_databases() const {
 /// @param schema The schema of the table to create
 /// @return False if the selected database does not exist or the schema/table is invalid
 bool Database::create_table(const Schema& schema) {
-    return catalog_.create_table(database_name_, schema);
+    WalManager* wal = wal_manager();
+    const uint64_t transaction_id = next_transaction_id();
+    if (wal != nullptr && wal->begin_transaction(transaction_id) == 0) {
+        return false;
+    }
+    if (wal != nullptr && wal->log_create_table(transaction_id, table_directory_path(schema.table_name()), serialize_schema(schema)) == 0) {
+        rollback_statement(transaction_id);
+        return false;
+    }
+
+    if (!catalog_.create_table(database_name_, schema)) {
+        rollback_statement(transaction_id);
+        return false;
+    }
+
+    return commit_statement(transaction_id);
 }
 
 /// @brief Check whether a table exists in the selected database
@@ -66,10 +82,23 @@ std::optional<RecordId> Database::insert_row(const std::string& table_name, cons
         return std::nullopt;
     }
 
+    const uint64_t transaction_id = next_transaction_id();
+    WalManager* wal = wal_manager();
+    if (wal != nullptr && wal->begin_transaction(transaction_id) == 0) {
+        return std::nullopt;
+    }
+
     try {
-        TableFile table_file(catalog_.table_file_path(database_name_, table_name));
-        return table_file.insert_record(*record);
+        TableFile table_file(catalog_.table_file_path(database_name_, table_name), wal, transaction_id);
+        std::optional<RecordId> record_id = table_file.insert_record(*record);
+        if (!record_id.has_value() || !commit_statement(transaction_id)) {
+            rollback_statement(transaction_id);
+            table_file.discard_cache();
+            return std::nullopt;
+        }
+        return record_id;
     } catch (const std::exception&) {
+        rollback_statement(transaction_id);
         return std::nullopt;
     }
 }
@@ -86,7 +115,7 @@ std::optional<Row> Database::read_row(const std::string& table_name, RecordId re
 
     std::vector<uint8_t> record;
     try {
-        TableFile table_file(catalog_.table_file_path(database_name_, table_name));
+        TableFile table_file(catalog_.table_file_path(database_name_, table_name), const_cast<Database*>(this)->wal_manager());
         if (!table_file.read_record(record_id, record)) {
             return std::nullopt;
         }
@@ -113,7 +142,7 @@ bool Database::scan_rows(const std::string& table_name, const std::function<bool
     }
 
     try {
-        TableFile table_file(catalog_.table_file_path(database_name_, table_name));
+        TableFile table_file(catalog_.table_file_path(database_name_, table_name), const_cast<Database*>(this)->wal_manager());
         return table_file.scan_records([&schema, &callback](RecordId record_id, const std::vector<uint8_t>& record) {
             Row row;
             if (RecordSerializer::deserialize(*schema, record, row)) {
@@ -147,10 +176,22 @@ bool Database::delete_row(const std::string& table_name, RecordId record_id) {
         return false;
     }
 
+    const uint64_t transaction_id = next_transaction_id();
+    WalManager* wal = wal_manager();
+    if (wal != nullptr && wal->begin_transaction(transaction_id) == 0) {
+        return false;
+    }
+
     try {
-        TableFile table_file(catalog_.table_file_path(database_name_, table_name));
-        return table_file.delete_record(record_id);
+        TableFile table_file(catalog_.table_file_path(database_name_, table_name), wal, transaction_id);
+        if (!table_file.delete_record(record_id)) {
+            rollback_statement(transaction_id);
+            table_file.discard_cache();
+            return false;
+        }
+        return commit_statement(transaction_id);
     } catch (const std::exception&) {
+        rollback_statement(transaction_id);
         return false;
     }
 }
@@ -166,12 +207,81 @@ bool Database::update_row(const std::string& table_name, RecordId& record_id, co
         return false;
     }
 
-    try {
-        TableFile table_file(catalog_.table_file_path(database_name_, table_name));
-        return table_file.update_record(record_id, *record);
-    } catch (const std::exception&) {
+    const uint64_t transaction_id = next_transaction_id();
+    WalManager* wal = wal_manager();
+    if (wal != nullptr && wal->begin_transaction(transaction_id) == 0) {
         return false;
     }
+
+    try {
+        TableFile table_file(catalog_.table_file_path(database_name_, table_name), wal, transaction_id);
+        if (!table_file.update_record(record_id, *record)) {
+            rollback_statement(transaction_id);
+            table_file.discard_cache();
+            return false;
+        }
+        return commit_statement(transaction_id);
+    } catch (const std::exception&) {
+        rollback_statement(transaction_id);
+        return false;
+    }
+}
+
+WalManager* Database::wal_manager() {
+    if (!database_exists()) {
+        return nullptr;
+    }
+    if (wal_manager_ == nullptr) {
+        wal_manager_ = std::make_unique<WalManager>(data_root_ / database_name_ / "database.wal");
+        wal_manager_->recover();
+        if (next_transaction_id_ <= wal_manager_->last_lsn()) {
+            next_transaction_id_ = wal_manager_->last_lsn() + 1;
+        }
+    }
+    return wal_manager_.get();
+}
+
+uint64_t Database::next_transaction_id() {
+    return next_transaction_id_++;
+}
+
+bool Database::commit_statement(uint64_t transaction_id) {
+    WalManager* wal = wal_manager();
+    if (wal == nullptr) {
+        return true;
+    }
+    const uint64_t commit_lsn = wal->commit_transaction(transaction_id);
+    return commit_lsn != 0 && wal->flush_through(commit_lsn);
+}
+
+bool Database::rollback_statement(uint64_t transaction_id) {
+    WalManager* wal = wal_manager();
+    if (wal == nullptr) {
+        return true;
+    }
+    return wal->rollback_transaction(transaction_id);
+}
+
+std::string Database::serialize_schema(const Schema& schema) const {
+    std::ostringstream out;
+    out << "table " << schema.table_name() << '\n';
+    for (const Column& column : schema.columns()) {
+        out << "column "
+            << column.name() << ' '
+            << Column::type_to_string(column.type()) << ' '
+            << (column.nullable() ? 1 : 0) << ' '
+            << column.max_size() << ' '
+            << static_cast<int>(column.precision()) << ' '
+            << static_cast<int>(column.scale()) << '\n';
+    }
+    for (const ConstraintDefinition& constraint : schema.constraints()) {
+        out << "constraint " << constraint.serialized() << '\n';
+    }
+    return out.str();
+}
+
+std::filesystem::path Database::table_directory_path(const std::string& table_name) const {
+    return data_root_ / database_name_ / table_name;
 }
 
 /// @brief Build record bytes from a row using a table's schema

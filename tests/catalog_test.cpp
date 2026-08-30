@@ -207,6 +207,31 @@ void catalog_create_and_load() {
     std::filesystem::remove_all(root);
 }
 
+void catalog_schema_write_is_atomic() {
+    const std::filesystem::path root = temp_path("atomic_schema");
+    std::filesystem::remove_all(root);
+
+    Catalog catalog(root);
+    require(catalog.create_database("school"), "create database failed");
+
+    Schema schema("student", {
+        Column::integer_column("id", false),
+        Column::varstring_column("name", false, 64),
+    });
+
+    require(catalog.create_table("school", schema), "create table failed");
+
+    const std::filesystem::path table_dir = root / "school" / "student";
+    require(std::filesystem::is_regular_file(table_dir / "schema.catalog"), "schema file missing");
+    require(!std::filesystem::exists(table_dir / "schema.catalog.tmp"), "schema temp file was left behind");
+
+    std::optional<Schema> loaded = catalog.load_schema("school", "student");
+    require(loaded.has_value(), "atomic schema load failed");
+    require(loaded->column_count() == 2, "atomic schema column count mismatch");
+
+    std::filesystem::remove_all(root);
+}
+
 void catalog_lists_names() {
     const std::filesystem::path root = temp_path("lists");
     std::filesystem::remove_all(root);
@@ -239,6 +264,7 @@ void add_catalog_tests(std::vector<TestCase>& tests) {
     tests.push_back({"schema lookup", schema_lookup_and_validation});
     tests.push_back({"schema column limit", schema_column_limit});
     tests.push_back({"catalog create/load", catalog_create_and_load});
+    tests.push_back({"catalog atomic schema", catalog_schema_write_is_atomic});
     tests.push_back({"catalog lists", catalog_lists_names});
 }
 

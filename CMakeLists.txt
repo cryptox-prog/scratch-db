@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(ScratchDb LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,9 +37,12 @@ add_library(db_engine
     src/record/serializer.cpp
     src/record/value.cpp
     src/storage/page.cpp
+    src/storage/page_cache.cpp
     src/storage/table_file.cpp
+    src/storage/wal_manager.cpp
 )
 target_include_directories(db_engine PUBLIC include)
+target_link_libraries(db_engine PUBLIC Threads::Threads)
 
 # Database usage utility terminal
 add_executable(db_cli
@@ -64,6 +68,18 @@ add_executable(table_file_tests
 )
 target_link_libraries(table_file_tests PRIVATE db_engine)
 add_test(NAME TableFileTests COMMAND table_file_tests)
+
+add_executable(page_cache_tests
+    tests/page_cache_test.cpp
+)
+target_link_libraries(page_cache_tests PRIVATE db_engine)
+add_test(NAME PageCacheTests COMMAND page_cache_tests)
+
+add_executable(wal_manager_tests
+    tests/wal_manager_test.cpp
+)
+target_link_libraries(wal_manager_tests PRIVATE db_engine)
+add_test(NAME WalManagerTests COMMAND wal_manager_tests)
 
 add_executable(catalog_tests
     tests/catalog_test.cpp

@@ -1,4 +1,5 @@
 #include "database/database.hpp"
+#include "storage/wal_manager.hpp"
 #include "test_utils.hpp"
 
 #include <filesystem>
@@ -142,6 +143,27 @@ void reject_bad_row() {
     std::filesystem::remove_all(root);
 }
 
+void modifying_statements_use_wal_transactions() {
+    const std::filesystem::path root = temp_path("statement_wal");
+    std::filesystem::remove_all(root);
+
+    {
+        Database database(root, "school");
+        require(database.create_database(), "create database failed");
+        require(database.create_table(student_schema()), "create table failed");
+        require(database.insert_row("student", Row({
+            Value::integer_value(1),
+            Value::varstring_value("alice"),
+            Value::null_value(),
+        })).has_value(), "insert row failed");
+    }
+
+    WalManager wal(root / "school" / "database.wal");
+    require(wal.last_lsn() == 6, "statement transaction log count wrong");
+
+    std::filesystem::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -151,6 +173,7 @@ int main() {
     tests.push_back({"database update/delete", update_and_delete_row});
     tests.push_back({"database scan", scan_rows});
     tests.push_back({"database bad row", reject_bad_row});
+    tests.push_back({"database statement wal", modifying_statements_use_wal_transactions});
 
     return run_tests(tests);
 }

@@ -1,24 +1,95 @@
 #include "catalog/catalog.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <fstream>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <system_error>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace {
     constexpr const char* SCHEMA_FILE_NAME = "schema.catalog";
     constexpr const char* TABLE_FILE_NAME = "data.tbl";
 
-    /// @brief Write a given schema file to the given path
-    /// @param path The path to write the catalog file of the table
-    /// @param schema The schema to write
-    /// @return False if failed to create write stream for path
-    bool write_schema_file(const std::filesystem::path& path, const Schema& schema) {
-        std::ofstream out(path);
-        if (!out) {
+    bool write_all(int fd, const std::string& text) {
+        const char* data = text.data();
+        std::size_t remaining = text.size();
+
+        while (remaining > 0) {
+            const ssize_t written = ::write(fd, data, remaining);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            if (written == 0) {
+                return false;
+            }
+
+            data += written;
+            remaining -= static_cast<std::size_t>(written);
+        }
+
+        return true;
+    }
+
+    bool fsync_directory(const std::filesystem::path& path) {
+        const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
+        if (fd < 0) {
             return false;
         }
+
+        bool ok = true;
+        if (::fsync(fd) != 0) {
+            ok = false;
+        }
+        if (::close(fd) != 0) {
+            ok = false;
+        }
+
+        return ok;
+    }
+
+    bool create_directory_durable(const std::filesystem::path& path) {
+        std::error_code error;
+        if (!std::filesystem::create_directories(path, error) || error) {
+            return false;
+        }
+
+        const std::filesystem::path parent = path.parent_path();
+        return parent.empty() || fsync_directory(parent);
+    }
+
+    bool create_empty_file_durable(const std::filesystem::path& path) {
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+            return false;
+        }
+
+        bool ok = true;
+        if (::fsync(fd) != 0) {
+            ok = false;
+        }
+        if (::close(fd) != 0) {
+            ok = false;
+        }
+        if (!ok) {
+            std::filesystem::remove(path);
+            return false;
+        }
+
+        const std::filesystem::path parent = path.parent_path();
+        return parent.empty() || fsync_directory(parent);
+    }
+
+    std::string serialize_schema(const Schema& schema) {
+        std::ostringstream out;
 
         out << "table " << schema.table_name() << '\n';
         for (const Column& column : schema.columns()) {
@@ -35,7 +106,41 @@ namespace {
             out << "constraint " << constraint.serialized() << '\n';
         }
 
-        return static_cast<bool>(out);
+        return out.str();
+    }
+
+    /// @brief Write a schema file by replacing it with a fully flushed temporary file.
+    /// @param path The path to write the catalog file of the table
+    /// @param schema The schema to write
+    /// @return False if temp write, fsync, rename, or parent directory fsync fails
+    bool write_schema_file(const std::filesystem::path& path, const Schema& schema) {
+        const std::filesystem::path temp_path = path.string() + ".tmp";
+        const std::string text = serialize_schema(schema);
+
+        const int fd = ::open(temp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            return false;
+        }
+
+        bool ok = write_all(fd, text);
+        if (ok && ::fsync(fd) != 0) {
+            ok = false;
+        }
+        if (::close(fd) != 0) {
+            ok = false;
+        }
+        if (!ok) {
+            std::filesystem::remove(temp_path);
+            return false;
+        }
+
+        if (::rename(temp_path.c_str(), path.c_str()) != 0) {
+            std::filesystem::remove(temp_path);
+            return false;
+        }
+
+        const std::filesystem::path parent = path.parent_path();
+        return parent.empty() || fsync_directory(parent);
     }
 
     /// @brief Read the schema file from given file
@@ -156,7 +261,7 @@ bool Catalog::create_database(const std::string& database_name) {
         return false;
     }
 
-    return std::filesystem::create_directories(database_path(database_name));
+    return create_directory_durable(database_path(database_name));
 }
 
 /// @brief Check if DB of same name already exists
@@ -184,17 +289,26 @@ bool Catalog::create_table(const std::string& database_name, const Schema& schem
     }
 
     const std::filesystem::path table_dir = table_path(database_name, schema.table_name());
-    if (!std::filesystem::create_directories(table_dir)) {
+    if (!create_directory_durable(table_dir)) {
         return false;
     }
 
-    std::ofstream table_file(table_file_path(database_name, schema.table_name()), std::ios::binary);
-    if (!table_file) {
+    const auto cleanup_table_dir = [&]() {
+        std::filesystem::remove_all(table_dir);
+        fsync_directory(table_dir.parent_path());
+    };
+
+    if (!create_empty_file_durable(table_file_path(database_name, schema.table_name()))) {
+        cleanup_table_dir();
         return false;
     }
-    table_file.close();
 
-    return write_schema_file(schema_file_path(database_name, schema.table_name()), schema);
+    if (!write_schema_file(schema_file_path(database_name, schema.table_name()), schema)) {
+        cleanup_table_dir();
+        return false;
+    }
+
+    return true;
 }
 
 /// @brief Check if table of given name already exists in a DB

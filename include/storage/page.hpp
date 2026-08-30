@@ -10,6 +10,7 @@
 struct PageHeader {
     uint16_t slot_count;
     uint16_t free_space_end;
+    uint64_t page_lsn;
 };
 
 struct Slot {
@@ -36,6 +37,8 @@ public:
     uint8_t* data();
 
     uint16_t slot_count() const;
+    uint64_t page_lsn() const;
+    void set_page_lsn(uint64_t page_lsn);
 
 private:
     PageHeader header() const;

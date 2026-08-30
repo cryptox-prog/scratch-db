@@ -24,6 +24,20 @@ namespace {
         ptr[1] = static_cast<uint8_t>((value >> 8) & 0xff);
     }
 
+    uint64_t read_uint64(const uint8_t* ptr) {
+        uint64_t value = 0;
+        for (uint16_t i = 0; i < BYTE_SIZES::UINT64; ++i) {
+            value |= static_cast<uint64_t>(ptr[i]) << (i * 8);
+        }
+        return value;
+    }
+
+    void write_uint64(uint8_t* ptr, uint64_t value) {
+        for (uint16_t i = 0; i < BYTE_SIZES::UINT64; ++i) {
+            ptr[i] = static_cast<uint8_t>((value >> (i * 8)) & 0xff);
+        }
+    }
+
     /// @brief Find where a given slot is in a page
     /// @param slot_id The index of the slot in the page
     /// @return The offset to shift by from page start to reach the slot start
@@ -43,7 +57,7 @@ Page::Page() {
 /// @note Blank Space Header => 0 slot count and free space end at end of page
 void Page::reset() {
     data_.fill(0);
-    write_header(PageHeader{0, static_cast<uint16_t>(BYTE_SIZES::PAGE_SIZE)});
+    write_header(PageHeader{0, static_cast<uint16_t>(BYTE_SIZES::PAGE_SIZE), 0});
 }
 
 /// @brief Insert a new record into the page
@@ -256,12 +270,23 @@ uint16_t Page::slot_count() const {
     return header().slot_count;
 }
 
+uint64_t Page::page_lsn() const {
+    return header().page_lsn;
+}
+
+void Page::set_page_lsn(uint64_t page_lsn) {
+    PageHeader h = header();
+    h.page_lsn = page_lsn;
+    write_header(h);
+}
+
 /// @brief Read the Page header
 /// @return The Slot Count and Free Space End shift
 PageHeader Page::header() const {
     return PageHeader{
         read_uint16(data_.data()),                              // The slot count
         read_uint16(data_.data() + BYTE_SIZES::SLOT_COUNT),     // The free space end
+        read_uint64(data_.data() + BYTE_SIZES::PAGE_LSN),       // Last log record flushed before this page
     };
 }
 
@@ -270,6 +295,7 @@ PageHeader Page::header() const {
 void Page::write_header(const PageHeader& header) {
     write_uint16(data_.data(), header.slot_count);
     write_uint16(data_.data() + BYTE_SIZES::SLOT_COUNT, header.free_space_end);
+    write_uint64(data_.data() + BYTE_SIZES::PAGE_LSN, header.page_lsn);
 }
 
 /// @brief Get slot data
