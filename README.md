@@ -392,3 +392,6 @@ Known limits:
 - no cost-based optimizer using relational algebra
 - HTTP server is demo-oriented
 
+## Live Preview
+
+The live version is written in react for frontend but it calls this cpp db on its backend which is in repo: https://github.com/cryptox-prog/scratch-db-online-cli and available at https://scratch-db-online-cgc1dp3m4-argonauts1.vercel.app/
