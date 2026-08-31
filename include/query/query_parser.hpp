@@ -13,9 +13,14 @@ enum class QueryType {
     help,
     show_databases,
     show_tables,
+    show_indexes,
     create_database,
     use_database,
     create_table,
+    create_index,
+    drop_database,
+    drop_table,
+    drop_index,
     alter_table,
     describe_table,
     insert_row,
@@ -64,11 +69,19 @@ enum class QueryAggregateFunction {
     count,
 };
 
+enum class QueryScalarFunction {
+    none,
+    length,
+    upper,
+    lower,
+};
+
 struct SelectedColumn {
     std::string table_alias;
     std::string column_name;
     std::string alias;
     QueryAggregateFunction aggregate = QueryAggregateFunction::none;
+    QueryScalarFunction scalar_function = QueryScalarFunction::none;
     std::size_t position = 0;
 };
 
@@ -167,8 +180,14 @@ struct ParsedQuery {
     std::unique_ptr<ParsedQuery> derived_table;
     std::vector<Column> columns;
     std::vector<ConstraintDefinition> constraints;
+    TableStorageMode storage_mode = TableStorageMode::disk;
+    std::string index_name;
+    std::string index_column;
+    bool unique_index = false;
+    bool if_not_exists = false;
     std::optional<uint64_t> drop_constraint_id;
     std::vector<std::string> insert_columns;
+    std::unique_ptr<ParsedQuery> insert_select;
     std::string values_text;
     std::vector<std::string> insert_value_rows;
     std::vector<std::pair<std::string, std::string>> update_assignments;

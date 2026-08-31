@@ -92,6 +92,7 @@ namespace {
         std::ostringstream out;
 
         out << "table " << schema.table_name() << '\n';
+        out << "storage " << (schema.storage_mode() == TableStorageMode::memory ? "MEMORY" : "DISK") << '\n';
         for (const Column& column : schema.columns()) {
             out << "column "
                 << column.name() << ' '
@@ -104,6 +105,9 @@ namespace {
         }
         for (const ConstraintDefinition& constraint : schema.constraints()) {
             out << "constraint " << constraint.serialized() << '\n';
+        }
+        for (const IndexDefinition& index : schema.indexes()) {
+            out << "index " << index.serialized() << '\n';
         }
 
         return out.str();
@@ -167,6 +171,8 @@ namespace {
 
         std::vector<Column> columns;
         std::vector<ConstraintDefinition> constraints;
+        std::vector<IndexDefinition> indexes;
+        TableStorageMode storage_mode = TableStorageMode::disk;
         while (std::getline(in, line)) {
             if (line.empty()) {
                 continue;
@@ -176,7 +182,19 @@ namespace {
             if (!(line_stream >> word)) {
                 return std::nullopt;
             }
-            if (word == "column") {
+            if (word == "storage") {
+                std::string storage_text;
+                if (!(line_stream >> storage_text)) {
+                    return std::nullopt;
+                }
+                if (storage_text == "MEMORY") {
+                    storage_mode = TableStorageMode::memory;
+                } else if (storage_text == "DISK") {
+                    storage_mode = TableStorageMode::disk;
+                } else {
+                    return std::nullopt;
+                }
+            } else if (word == "column") {
                 std::string column_name;
                 std::string type_text;
                 int nullable = 0;
@@ -215,13 +233,19 @@ namespace {
                     return std::nullopt;
                 }
                 constraints.push_back(ConstraintDefinition::from_serialized(constraint_text));
+            } else if (word == "index") {
+                std::string index_text;
+                if (!(line_stream >> index_text)) {
+                    return std::nullopt;
+                }
+                indexes.push_back(IndexDefinition::from_serialized(index_text));
             } else {
                 return std::nullopt;
             }
         }
 
         try {
-            return Schema(table_name, columns, constraints);
+            return Schema(table_name, columns, constraints, indexes, storage_mode);
         } catch (const std::invalid_argument&) {
             return std::nullopt;
         }
@@ -262,6 +286,17 @@ bool Catalog::create_database(const std::string& database_name) {
     }
 
     return create_directory_durable(database_path(database_name));
+}
+
+bool Catalog::drop_database(const std::string& database_name) {
+    if (!Schema::is_valid_table_name(database_name) || !database_exists(database_name)) {
+        return false;
+    }
+    const std::filesystem::path path = database_path(database_name);
+    const std::filesystem::path parent = path.parent_path();
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+    return !error && (parent.empty() || fsync_directory(parent));
 }
 
 /// @brief Check if DB of same name already exists
@@ -309,6 +344,17 @@ bool Catalog::create_table(const std::string& database_name, const Schema& schem
     }
 
     return true;
+}
+
+bool Catalog::drop_table(const std::string& database_name, const std::string& table_name) {
+    if (!database_exists(database_name) || !table_exists(database_name, table_name)) {
+        return false;
+    }
+    const std::filesystem::path path = table_path(database_name, table_name);
+    const std::filesystem::path parent = path.parent_path();
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+    return !error && (parent.empty() || fsync_directory(parent));
 }
 
 bool Catalog::replace_table_schema(const std::string& database_name, const Schema& schema) {

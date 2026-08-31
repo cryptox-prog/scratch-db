@@ -207,6 +207,58 @@ void catalog_create_and_load() {
     std::filesystem::remove_all(root);
 }
 
+void catalog_saves_indexes() {
+    const std::filesystem::path root = temp_path("indexes");
+    std::filesystem::remove_all(root);
+
+    Catalog catalog(root);
+    require(catalog.create_database("school"), "create database failed");
+    Schema schema(
+        "student",
+        {
+            Column::integer_column("id", false),
+            Column::varstring_column("name", false, 128),
+        },
+        {},
+        {IndexDefinition::make(1, "idx_student_id", {"id"}, true)}
+    );
+
+    require(catalog.create_table("school", schema), "create indexed table failed");
+    std::optional<Schema> loaded = catalog.load_schema("school", "student");
+    require(loaded.has_value(), "indexed schema load failed");
+    require(loaded->indexes().size() == 1, "index metadata missing");
+    require(loaded->indexes()[0].name == "idx_student_id", "index name mismatch");
+    require(loaded->indexes()[0].columns.size() == 1 && loaded->indexes()[0].columns[0] == "id", "index column mismatch");
+    require(loaded->indexes()[0].unique, "index unique flag missing");
+
+    std::filesystem::remove_all(root);
+}
+
+void catalog_saves_storage_mode() {
+    const std::filesystem::path root = temp_path("storage_mode");
+    std::filesystem::remove_all(root);
+
+    Catalog catalog(root);
+    require(catalog.create_database("school"), "create database failed");
+    Schema schema(
+        "cache",
+        {
+            Column::integer_column("id", false),
+            Column::text_column("value", true),
+        },
+        {},
+        {},
+        TableStorageMode::memory
+    );
+
+    require(catalog.create_table("school", schema), "create memory table failed");
+    std::optional<Schema> loaded = catalog.load_schema("school", "cache");
+    require(loaded.has_value(), "memory schema load failed");
+    require(loaded->storage_mode() == TableStorageMode::memory, "storage mode was not persisted");
+
+    std::filesystem::remove_all(root);
+}
+
 void catalog_schema_write_is_atomic() {
     const std::filesystem::path root = temp_path("atomic_schema");
     std::filesystem::remove_all(root);
@@ -264,6 +316,8 @@ void add_catalog_tests(std::vector<TestCase>& tests) {
     tests.push_back({"schema lookup", schema_lookup_and_validation});
     tests.push_back({"schema column limit", schema_column_limit});
     tests.push_back({"catalog create/load", catalog_create_and_load});
+    tests.push_back({"catalog indexes", catalog_saves_indexes});
+    tests.push_back({"catalog storage mode", catalog_saves_storage_mode});
     tests.push_back({"catalog atomic schema", catalog_schema_write_is_atomic});
     tests.push_back({"catalog lists", catalog_lists_names});
 }

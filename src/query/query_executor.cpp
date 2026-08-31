@@ -1,6 +1,7 @@
 #include "query/query_executor.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <iomanip>
@@ -183,6 +184,46 @@ namespace {
             return "count";
         }
         return "";
+    }
+
+    std::string scalar_function_name(QueryScalarFunction scalar_function) {
+        if (scalar_function == QueryScalarFunction::length) {
+            return "length";
+        }
+        if (scalar_function == QueryScalarFunction::upper) {
+            return "upper";
+        }
+        if (scalar_function == QueryScalarFunction::lower) {
+            return "lower";
+        }
+        return "";
+    }
+
+    std::string scalar_function_type(QueryScalarFunction scalar_function, const QueryResultColumn& source_column) {
+        if (scalar_function == QueryScalarFunction::length) {
+            return "integer";
+        }
+        return source_column.type;
+    }
+
+    std::string apply_scalar_function(QueryScalarFunction scalar_function, const std::string& value) {
+        if (value == "NULL") {
+            return value;
+        }
+        if (scalar_function == QueryScalarFunction::length) {
+            return std::to_string(value.size());
+        }
+        std::string result = value;
+        if (scalar_function == QueryScalarFunction::upper) {
+            std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::toupper(ch));
+            });
+        } else if (scalar_function == QueryScalarFunction::lower) {
+            std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+        }
+        return result;
     }
 
     bool selected_has_aggregate(const ParsedQuery& query) {
@@ -784,6 +825,65 @@ namespace {
         return false;
     }
 
+    std::optional<std::string> resolved_join_column(
+        const QueryExpression& expression,
+        const Schema& target_schema,
+        const Schema& other_schema,
+        const std::map<std::string, std::string>& target_alias_map
+    ) {
+        if (expression.type != QueryExpressionType::column_reference) {
+            return std::nullopt;
+        }
+        if (!expression.table_alias.empty()) {
+            const auto alias = target_alias_map.find(expression.table_alias + "." + expression.column_name);
+            if (alias == target_alias_map.end()) {
+                return std::nullopt;
+            }
+            return alias->second;
+        }
+        if (target_schema.find_column(expression.column_name) == nullptr) {
+            return std::nullopt;
+        }
+        if (other_schema.find_column(expression.column_name) != nullptr) {
+            return std::nullopt;
+        }
+        return expression.column_name;
+    }
+
+    struct IndexedJoinLookup {
+        std::string left_column_name;
+        std::string right_column_name;
+    };
+
+    std::optional<IndexedJoinLookup> indexed_join_lookup(
+        const QueryJoin& join,
+        const Schema& left_schema,
+        const Schema& right_schema,
+        const std::map<std::string, std::string>& left_alias_map,
+        const std::map<std::string, std::string>& right_alias_map
+    ) {
+        if (join.condition == nullptr ||
+            join.condition->type != QueryConditionNodeType::comparison ||
+            join.condition->condition.op != QueryOperator::equal) {
+            return std::nullopt;
+        }
+
+        const QueryExpression& left_expression = join.condition->condition.left_expression;
+        const QueryExpression& right_expression = join.condition->condition.right_expression;
+        std::optional<std::string> left_column = resolved_join_column(left_expression, left_schema, right_schema, left_alias_map);
+        std::optional<std::string> right_column = resolved_join_column(right_expression, right_schema, left_schema, right_alias_map);
+        if (left_column.has_value() && right_column.has_value()) {
+            return IndexedJoinLookup{*left_column, *right_column};
+        }
+
+        left_column = resolved_join_column(right_expression, left_schema, right_schema, left_alias_map);
+        right_column = resolved_join_column(left_expression, right_schema, left_schema, right_alias_map);
+        if (left_column.has_value() && right_column.has_value()) {
+            return IndexedJoinLookup{*left_column, *right_column};
+        }
+        return std::nullopt;
+    }
+
     bool natural_join_matches(const Schema& left_schema, const TableRow& left_row, const Schema& right_schema, const TableRow& right_row) {
         for (const Column& left_column : left_schema.columns()) {
             const Column* right_column = right_schema.find_column(left_column.name());
@@ -1181,7 +1281,10 @@ namespace {
                 return error_result("unknown selected column", selected.column_name, "", selected.position);
             }
             const QueryResultColumn& source_column = source.columns[static_cast<std::size_t>(index)];
-            result.columns.push_back({selected.alias.empty() ? source_column.name : selected.alias, source_column.type});
+            const std::string output_name = selected.alias.empty() ?
+                (selected.scalar_function == QueryScalarFunction::none ? source_column.name : scalar_function_name(selected.scalar_function)) :
+                selected.alias;
+            result.columns.push_back({output_name, scalar_function_type(selected.scalar_function, source_column)});
         }
 
         for (const std::vector<std::string>& row : source.rows) {
@@ -1191,7 +1294,8 @@ namespace {
                 if (index == -2) {
                     return error_result("ambiguous selected column", selected.column_name, "", selected.position);
                 }
-                projected.push_back(row[static_cast<std::size_t>(index)]);
+                const std::string& value = row[static_cast<std::size_t>(index)];
+                projected.push_back(selected.scalar_function == QueryScalarFunction::none ? value : apply_scalar_function(selected.scalar_function, value));
             }
             result.rows.push_back(std::move(projected));
         }
@@ -1533,17 +1637,30 @@ QueryResult QueryExecutor::execute_parsed(const ParsedQuery& query) {
             return show_databases();
         case QueryType::show_tables:
             return show_tables();
+        case QueryType::show_indexes:
+            return show_indexes(query.table_name);
         case QueryType::create_database:
             return create_database(query.database_name);
         case QueryType::use_database:
             return use_database(query.database_name);
         case QueryType::create_table:
-            return create_table(query.table_name, query.columns, query.constraints);
+            return create_table(query.table_name, query.columns, query.constraints, query.if_not_exists, query.storage_mode);
+        case QueryType::create_index:
+            return create_index(query.table_name, query.index_name, query.index_column, query.unique_index);
+        case QueryType::drop_database:
+            return drop_database(query.database_name);
+        case QueryType::drop_table:
+            return drop_table(query.table_name);
+        case QueryType::drop_index:
+            return drop_index(query.table_name, query.index_name);
         case QueryType::alter_table:
             return alter_table(query);
         case QueryType::describe_table:
             return describe_table(query.table_name);
         case QueryType::insert_row:
+            if (query.insert_select != nullptr) {
+                return insert_select(query.table_name, query.insert_columns, *query.insert_select);
+            }
             if (!query.insert_value_rows.empty()) {
                 return insert_row(query.table_name, query.insert_columns, query.insert_value_rows);
             }
@@ -1572,7 +1689,14 @@ QueryResult QueryExecutor::help() const {
         {"USE name;"},
         {"SHOW DATABASES;"},
         {"SHOW TABLES;"},
+        {"SHOW INDEXES FROM table;"},
         {"CREATE TABLE name (id INTEGER NOT NULL, name VARSTRING(128) NULL);"},
+        {"CREATE TABLE IF NOT EXISTS name (id INTEGER NOT NULL);"},
+        {"CREATE INDEX index_name ON table (column);"},
+        {"CREATE UNIQUE INDEX index_name ON table (column);"},
+        {"DROP INDEX index_name ON table;"},
+        {"DROP TABLE table;"},
+        {"DROP DATABASE database;"},
         {"DESCRIBE table;"},
         {"INSERT INTO table VALUES (1, 'alice', NULL);"},
         {"SELECT * FROM table;"},
@@ -1667,7 +1791,33 @@ QueryResult QueryExecutor::show_tables() {
     return result;
 }
 
-QueryResult QueryExecutor::create_table(const std::string& table_name, const std::vector<Column>& columns, const std::vector<ConstraintDefinition>& constraints) {
+QueryResult QueryExecutor::show_indexes(const std::string& table_name) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
+    }
+
+    std::optional<Schema> schema = db->load_schema(table_name);
+    if (!schema.has_value()) {
+        return error_result("unknown table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+
+    QueryResult result;
+    result.columns = {{"id", "integer"}, {"index", "string"}, {"column", "string"}, {"unique", "boolean"}};
+    for (const IndexDefinition& index : schema->indexes()) {
+        result.rows.push_back({
+            std::to_string(index.id),
+            index.name,
+            index.columns.empty() ? "" : index.columns[0],
+            index.unique ? "true" : "false",
+        });
+    }
+    result.metadata.row_count = result.rows.size();
+    set_basic_column_lookup(result);
+    return result;
+}
+
+QueryResult QueryExecutor::create_table(const std::string& table_name, const std::vector<Column>& columns, const std::vector<ConstraintDefinition>& constraints, bool if_not_exists, TableStorageMode storage_mode) {
     Database* db = database();
     if (db == nullptr) {
         return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
@@ -1675,9 +1825,12 @@ QueryResult QueryExecutor::create_table(const std::string& table_name, const std
 
     try {
         if (db->table_exists(table_name)) {
+            if (if_not_exists) {
+                return message_result("table already exists");
+            }
             return error_result("table already exists", table_name, current_command_, token_position(current_command_, table_name));
         }
-        if (!db->create_table(Schema(table_name, columns, constraints))) {
+        if (!db->create_table(Schema(table_name, columns, constraints, {}, storage_mode))) {
             return error_result("could not create table", table_name, current_command_, token_position(current_command_, table_name));
         }
     } catch (const std::exception& error) {
@@ -1685,6 +1838,68 @@ QueryResult QueryExecutor::create_table(const std::string& table_name, const std
     }
 
     return message_result("table created");
+}
+
+QueryResult QueryExecutor::create_index(const std::string& table_name, const std::string& index_name, const std::string& column_name, bool unique) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    std::optional<Schema> schema = db->load_schema(table_name);
+    if (!schema.has_value()) {
+        return error_result("unknown table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    if (schema->column_index(column_name) < 0) {
+        return error_result("unknown column", column_name, current_command_, token_position(current_command_, column_name));
+    }
+    if (!db->create_index(table_name, index_name, column_name, unique)) {
+        return error_result("could not create index", index_name, current_command_, token_position(current_command_, index_name));
+    }
+    return message_result("index created");
+}
+
+QueryResult QueryExecutor::drop_database(const std::string& database_name) {
+    Database target(data_root_, database_name);
+    if (!target.database_exists()) {
+        return error_result("unknown database", database_name, current_command_, token_position(current_command_, database_name));
+    }
+    if (!target.drop_database()) {
+        return error_result("could not drop database", database_name, current_command_, token_position(current_command_, database_name));
+    }
+    if (current_database_ == database_name) {
+        current_database_.clear();
+        database_.reset();
+    }
+    return message_result("database dropped");
+}
+
+QueryResult QueryExecutor::drop_table(const std::string& table_name) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    if (!db->table_exists(table_name)) {
+        return error_result("unknown table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    if (!db->drop_table(table_name)) {
+        return error_result("could not drop table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    return message_result("table dropped");
+}
+
+QueryResult QueryExecutor::drop_index(const std::string& table_name, const std::string& index_name) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    std::optional<Schema> schema = db->load_schema(table_name);
+    if (!schema.has_value()) {
+        return error_result("unknown table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+    if (!db->drop_index(table_name, index_name)) {
+        return error_result("unknown index", index_name, current_command_, token_position(current_command_, index_name));
+    }
+    return message_result("index dropped");
 }
 
 QueryResult QueryExecutor::alter_table(const ParsedQuery& query) {
@@ -1921,6 +2136,96 @@ QueryResult QueryExecutor::insert_row(const std::string& table_name, const std::
     return result;
 }
 
+QueryResult QueryExecutor::insert_select(const std::string& table_name, const std::vector<std::string>& insert_columns, const ParsedQuery& select_query) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", table_name, current_command_, token_position(current_command_, table_name));
+    }
+
+    std::optional<Schema> schema = db->load_schema(table_name);
+    if (!schema.has_value()) {
+        return error_result("unknown table", table_name, current_command_, token_position(current_command_, table_name));
+    }
+
+    QueryResult source = execute_select_chain(select_query);
+    if (!source.ok()) {
+        return source;
+    }
+
+    std::vector<std::string> target_columns = insert_columns;
+    if (target_columns.empty()) {
+        for (const Column& column : schema->columns()) {
+            target_columns.push_back(column.name());
+        }
+    }
+    if (target_columns.size() != source.columns.size()) {
+        return error_result(
+            "wrong selected column count: expected " + std::to_string(target_columns.size()) + ", got " + std::to_string(source.columns.size()),
+            table_name,
+            current_command_,
+            token_position(current_command_, table_name)
+        );
+    }
+
+    uint64_t inserted = 0;
+    for (const std::vector<std::string>& source_row : source.rows) {
+        std::vector<std::string> ordered(schema->column_count(), "");
+        std::set<std::string> seen;
+        for (std::size_t i = 0; i < target_columns.size(); ++i) {
+            const int column_index = schema->column_index(target_columns[i]);
+            if (column_index < 0) {
+                return error_result("unknown column", target_columns[i], current_command_, token_position(current_command_, target_columns[i]));
+            }
+            if (!seen.insert(target_columns[i]).second) {
+                return error_result("duplicate column", target_columns[i], current_command_, token_position(current_command_, target_columns[i]));
+            }
+            ordered[static_cast<std::size_t>(column_index)] = source_row[i] == "NULL" ? "NULL" : "'" + source_row[i] + "'";
+            const Column* column = schema->column(static_cast<uint16_t>(column_index));
+            if (column != nullptr &&
+                (column->type() == ColumnType::integer || column->type() == ColumnType::number)) {
+                ordered[static_cast<std::size_t>(column_index)] = source_row[i];
+            }
+        }
+        for (uint16_t i = 0; i < schema->column_count(); ++i) {
+            if (ordered[i].empty()) {
+                const Column* column = schema->column(i);
+                if (column == nullptr) {
+                    return error_result("invalid schema column", "", current_command_);
+                }
+                if (column->nullable()) {
+                    ordered[i] = "NULL";
+                } else {
+                    return error_result("missing value for required column", column->name(), current_command_, token_position(current_command_, column->name()));
+                }
+            }
+        }
+
+        ValueParseResult row = ValueParser::parse_row_with_error(*schema, join_value_list(ordered), token_position(current_command_, table_name));
+        if (!row.ok() || !row.row.has_value()) {
+            return value_error_result(*row.error, current_command_);
+        }
+
+        QueryResult constraint_error;
+        if (!row_satisfies_schema_constraints(table_name, *schema, row.row->values(), db, std::nullopt, constraint_error)) {
+            if (constraint_error.ok()) {
+                return error_result("constraint violation", table_name, current_command_, token_position(current_command_, table_name));
+            }
+            constraint_error.error->source = current_command_;
+            return constraint_error;
+        }
+
+        std::optional<RecordId> record_id = db->insert_row(table_name, *row.row);
+        if (!record_id.has_value()) {
+            return error_result("insert failed", table_name, current_command_, token_position(current_command_, table_name));
+        }
+        ++inserted;
+    }
+
+    QueryResult result = message_result("row inserted");
+    result.metadata.row_count = inserted;
+    return result;
+}
+
 QueryResult QueryExecutor::execute_join(const ParsedQuery& query) {
     Database* db = database();
     if (db == nullptr) {
@@ -1950,11 +2255,32 @@ QueryResult QueryExecutor::execute_join(const ParsedQuery& query) {
         const std::map<std::string, std::string> right_alias_map = build_alias_map(right_alias, *right_schema);
         const std::vector<Column> right_side_columns = join_columns_for_right_side(current_schema, *right_schema, current_join->type);
         std::vector<TableRow> next_rows;
-        std::vector<TableRow> right_rows = db->scan_rows(current_join->table_name);
+        std::vector<TableRow> right_rows;
+        const std::optional<IndexedJoinLookup> index_lookup =
+            current_join->type == QueryJoinType::inner || current_join->type == QueryJoinType::left ?
+            indexed_join_lookup(*current_join, current_schema, *right_schema, current_alias_map, right_alias_map) :
+            std::nullopt;
 
         for (const TableRow& left_row : current_rows) {
             bool matched = false;
-            for (const TableRow& right_row : right_rows) {
+            std::vector<TableRow> indexed_right_rows;
+            const std::vector<TableRow>* candidate_right_rows = &right_rows;
+            if (index_lookup.has_value()) {
+                const Value* left_value = row_value_for_column(current_schema, left_row.row, index_lookup->left_column_name);
+                if (left_value != nullptr) {
+                    std::optional<std::vector<TableRow>> found_rows =
+                        db->find_rows_by_index(current_join->table_name, index_lookup->right_column_name, *left_value);
+                    if (found_rows.has_value()) {
+                        indexed_right_rows = std::move(*found_rows);
+                        candidate_right_rows = &indexed_right_rows;
+                    }
+                }
+            }
+            if (candidate_right_rows == &right_rows && right_rows.empty()) {
+                right_rows = db->scan_rows(current_join->table_name);
+            }
+
+            for (const TableRow& right_row : *candidate_right_rows) {
                 bool include = true;
                 if (current_join->type == QueryJoinType::cross) {
                     include = true;
@@ -2254,6 +2580,141 @@ QueryResult QueryExecutor::select_all(const std::string& table_name, const std::
     QueryResult result;
     result.columns = table_columns(*schema);
     QueryResult condition_error;
+
+    if (condition != nullptr && condition->type == QueryConditionNodeType::and_node &&
+        condition->left != nullptr && condition->right != nullptr &&
+        condition->left->type == QueryConditionNodeType::comparison &&
+        condition->right->type == QueryConditionNodeType::comparison) {
+        const QueryCondition& left_condition = condition->left->condition;
+        const QueryCondition& right_condition = condition->right->condition;
+        if (left_condition.left_expression.type == QueryExpressionType::column_reference &&
+            right_condition.left_expression.type == QueryExpressionType::column_reference &&
+            left_condition.left_expression.column_name == right_condition.left_expression.column_name &&
+            left_condition.left_expression.table_alias == right_condition.left_expression.table_alias &&
+            left_condition.right_expression.type == QueryExpressionType::literal &&
+            right_condition.right_expression.type == QueryExpressionType::literal &&
+            (left_condition.left_expression.table_alias.empty() ||
+             left_condition.left_expression.table_alias == table_name ||
+             left_condition.left_expression.table_alias == table_alias)) {
+            const int column_index = schema->column_index(left_condition.left_expression.column_name);
+            const Column* column = column_index < 0 ? nullptr : schema->column(static_cast<uint16_t>(column_index));
+            std::optional<Value> lower_value;
+            std::optional<Value> upper_value;
+            bool include_lower = true;
+            bool include_upper = true;
+            bool usable_range = column != nullptr;
+
+            auto apply_bound = [&](const QueryCondition& query_condition) {
+                std::optional<Value> value = ValueParser::parse_value(*column, query_condition.right_expression.literal_text);
+                if (!value.has_value()) {
+                    usable_range = false;
+                    return;
+                }
+                if (query_condition.op == QueryOperator::greater || query_condition.op == QueryOperator::greater_equal) {
+                    lower_value = value;
+                    include_lower = query_condition.op == QueryOperator::greater_equal;
+                } else if (query_condition.op == QueryOperator::less || query_condition.op == QueryOperator::less_equal) {
+                    upper_value = value;
+                    include_upper = query_condition.op == QueryOperator::less_equal;
+                } else {
+                    usable_range = false;
+                }
+            };
+
+            if (usable_range) {
+                apply_bound(left_condition);
+                apply_bound(right_condition);
+            }
+            if (usable_range && lower_value.has_value() && upper_value.has_value()) {
+                std::optional<std::vector<TableRow>> indexed_rows = db->find_rows_by_index_range(
+                    table_name,
+                    left_condition.left_expression.column_name,
+                    lower_value,
+                    include_lower,
+                    upper_value,
+                    include_upper
+                );
+                if (indexed_rows.has_value()) {
+                    for (const TableRow& row : *indexed_rows) {
+                        const bool matches = row_matches_condition(*schema, row, condition, condition_error);
+                        if (!condition_error.ok()) {
+                            condition_error.error->source = current_command_;
+                            return condition_error;
+                        }
+                        if (matches) {
+                            result.rows.push_back(table_row(*schema, row));
+                        }
+                    }
+                    result.metadata.row_count = result.rows.size();
+                    set_table_column_lookup(result, table_name, table_alias);
+                    return result;
+                }
+            }
+        }
+    }
+
+    if (condition != nullptr &&
+        condition->type == QueryConditionNodeType::comparison) {
+        const QueryExpression& left = condition->condition.left_expression;
+        const QueryExpression& right = condition->condition.right_expression;
+        const QueryExpression* column_expression = nullptr;
+        const QueryExpression* literal_expression = nullptr;
+        QueryOperator index_operator = condition->condition.op;
+        if (left.type == QueryExpressionType::column_reference && right.type == QueryExpressionType::literal) {
+            column_expression = &left;
+            literal_expression = &right;
+        } else if (left.type == QueryExpressionType::literal && right.type == QueryExpressionType::column_reference) {
+            column_expression = &right;
+            literal_expression = &left;
+            if (index_operator == QueryOperator::greater) {
+                index_operator = QueryOperator::less;
+            } else if (index_operator == QueryOperator::less) {
+                index_operator = QueryOperator::greater;
+            } else if (index_operator == QueryOperator::greater_equal) {
+                index_operator = QueryOperator::less_equal;
+            } else if (index_operator == QueryOperator::less_equal) {
+                index_operator = QueryOperator::greater_equal;
+            }
+        }
+        if (column_expression != nullptr &&
+            literal_expression != nullptr &&
+            index_operator != QueryOperator::not_equal &&
+            (column_expression->table_alias.empty() || column_expression->table_alias == table_name || column_expression->table_alias == table_alias)) {
+            const int column_index = schema->column_index(column_expression->column_name);
+            const Column* column = column_index < 0 ? nullptr : schema->column(static_cast<uint16_t>(column_index));
+            std::optional<Value> value = column == nullptr ? std::nullopt : ValueParser::parse_value(*column, literal_expression->literal_text);
+            std::optional<std::vector<TableRow>> indexed_rows;
+            if (value.has_value()) {
+                if (index_operator == QueryOperator::equal) {
+                    indexed_rows = db->find_rows_by_index(table_name, column_expression->column_name, *value);
+                } else if (index_operator == QueryOperator::greater) {
+                    indexed_rows = db->find_rows_by_index_range(table_name, column_expression->column_name, value, false, std::nullopt, true);
+                } else if (index_operator == QueryOperator::greater_equal) {
+                    indexed_rows = db->find_rows_by_index_range(table_name, column_expression->column_name, value, true, std::nullopt, true);
+                } else if (index_operator == QueryOperator::less) {
+                    indexed_rows = db->find_rows_by_index_range(table_name, column_expression->column_name, std::nullopt, true, value, false);
+                } else if (index_operator == QueryOperator::less_equal) {
+                    indexed_rows = db->find_rows_by_index_range(table_name, column_expression->column_name, std::nullopt, true, value, true);
+                }
+            }
+            if (indexed_rows.has_value()) {
+                for (const TableRow& row : *indexed_rows) {
+                    const bool matches = row_matches_condition(*schema, row, condition, condition_error);
+                    if (!condition_error.ok()) {
+                        condition_error.error->source = current_command_;
+                        return condition_error;
+                    }
+                    if (matches) {
+                        result.rows.push_back(table_row(*schema, row));
+                    }
+                }
+                result.metadata.row_count = result.rows.size();
+                set_table_column_lookup(result, table_name, table_alias);
+                return result;
+            }
+        }
+    }
+
     const bool completed = db->scan_rows(table_name, [&schema, condition, &condition_error, &result](const TableRow& row) {
         const bool matches = row_matches_condition(*schema, row, condition, condition_error);
         if (!condition_error.ok()) {

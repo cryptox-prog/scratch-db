@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <fstream>
 #include <string>
 #include <atomic>
 #include <chrono>
@@ -69,6 +70,82 @@ void insert_and_read_row() {
     require(row->value(0)->integer_data() == 1, "bad id value");
     require(row->value(1)->string_data() == "alice", "bad name value");
     require(row->value(2)->is_null(), "bad nullable value");
+
+    std::filesystem::remove_all(root);
+}
+
+void create_and_use_unique_index() {
+    const std::filesystem::path root = temp_path("index");
+    std::filesystem::remove_all(root);
+
+    Database database(root, "school");
+    require(database.create_database(), "create database failed");
+    require(database.create_table(student_schema()), "create table failed");
+    require(database.insert_row("student", Row({
+        Value::integer_value(1),
+        Value::varstring_value("alice"),
+        Value::null_value(),
+    })).has_value(), "first insert failed");
+    require(database.create_index("student", "idx_student_id", "id", true), "create index failed");
+    require(!database.insert_row("student", Row({
+        Value::integer_value(1),
+        Value::varstring_value("other"),
+        Value::null_value(),
+    })).has_value(), "unique index allowed duplicate key");
+
+    std::optional<std::vector<TableRow>> rows = database.find_rows_by_index("student", "id", Value::integer_value(1));
+    require(rows.has_value(), "index lookup unavailable");
+    require(rows->size() == 1, "index lookup row count wrong");
+    require(rows->at(0).row.value(1)->string_data() == "alice", "index lookup returned wrong row");
+
+    std::filesystem::remove_all(root);
+}
+
+void memory_table_crud_uses_ram_storage() {
+    const std::filesystem::path root = temp_path("memory_table");
+    std::filesystem::remove_all(root);
+
+    Database database(root, "school");
+    require(database.create_database(), "create database failed");
+    Schema schema(
+        "cache",
+        {
+            Column::integer_column("id", false),
+            Column::text_column("value", true),
+        },
+        {},
+        {},
+        TableStorageMode::memory
+    );
+    require(database.create_table(schema), "create memory table failed");
+
+    std::optional<RecordId> record_id = database.insert_row("cache", Row({
+        Value::integer_value(1),
+        Value::text_value("one"),
+    }));
+    require(record_id.has_value(), "memory insert failed");
+    require(record_id->slot_id == 0, "memory record id slot wrong");
+
+    std::optional<Row> row = database.read_row("cache", *record_id);
+    require(row.has_value(), "memory read failed");
+    require(row->value(1)->string_data() == "one", "memory read value wrong");
+
+    Database same_process(root, "school");
+    require(same_process.scan_rows("cache").size() == 1, "memory rows not shared in process");
+
+    RecordId updated_id = *record_id;
+    require(database.update_row("cache", updated_id, Row({
+        Value::integer_value(1),
+        Value::text_value("updated"),
+    })), "memory update failed");
+    row = database.read_row("cache", updated_id);
+    require(row.has_value() && row->value(1)->string_data() == "updated", "memory update value wrong");
+
+    require(database.delete_row("cache", updated_id), "memory delete failed");
+    require(database.scan_rows("cache").empty(), "memory delete left rows");
+    require(database.drop_table("cache"), "drop memory table failed");
+    require(database.create_table(schema), "recreate memory table failed");
+    require(database.scan_rows("cache").empty(), "memory rows survived drop and recreate");
 
     std::filesystem::remove_all(root);
 }
@@ -456,6 +533,112 @@ void recovery_undoes_uncommitted_explicit_transaction() {
     std::filesystem::remove_all(root);
 }
 
+void recovery_restores_committed_index_pages() {
+    const std::filesystem::path root = temp_path("index_crash_recovery");
+    std::filesystem::remove_all(root);
+
+    {
+        Database database(root, "school");
+        require(database.create_database(), "create database failed");
+        require(database.create_table(student_schema()), "create table failed");
+        require(database.insert_row("student", Row({
+            Value::integer_value(1),
+            Value::varstring_value("alice"),
+            Value::null_value(),
+        })).has_value(), "first insert failed");
+        require(database.create_index("student", "idx_student_id", "id", true), "create index failed");
+        require(database.insert_row("student", Row({
+            Value::integer_value(2),
+            Value::varstring_value("bob"),
+            Value::null_value(),
+        })).has_value(), "second insert failed");
+    }
+
+    {
+        std::ofstream damaged(root / "school" / "student" / "index_1.idx", std::ios::binary | std::ios::trunc);
+        std::vector<char> zero_page(BYTE_SIZES::PAGE_SIZE, 0);
+        damaged.write(zero_page.data(), static_cast<std::streamsize>(zero_page.size()));
+        require(static_cast<bool>(damaged), "could not damage index file");
+    }
+
+    Database recovered(root, "school");
+    require(recovered.scan_rows("student").size() == 2, "table recovery failed before index lookup");
+    std::optional<std::vector<TableRow>> rows = recovered.find_rows_by_index("student", "id", Value::integer_value(2));
+    require(rows.has_value(), "recovered index lookup unavailable");
+    require(rows->size() == 1, "recovered index lookup row count wrong");
+    require(rows->at(0).row.value(1)->string_data() == "bob", "recovered index lookup row wrong");
+
+    std::filesystem::remove_all(root);
+}
+
+void recovery_undoes_uncommitted_index_entries() {
+    const std::filesystem::path root = temp_path("index_undo_recovery");
+    std::filesystem::remove_all(root);
+
+    {
+        Database database(root, "school");
+        require(database.create_database(), "create database failed");
+        require(database.create_table(student_schema()), "create table failed");
+        require(database.create_index("student", "idx_student_id", "id", true), "create index failed");
+        require(database.insert_row("student", Row({
+            Value::integer_value(1),
+            Value::varstring_value("alice"),
+            Value::null_value(),
+        })).has_value(), "committed insert failed");
+        require(database.begin_transaction(), "begin failed");
+        require(database.insert_row("student", Row({
+            Value::integer_value(2),
+            Value::varstring_value("bob"),
+            Value::null_value(),
+        })).has_value(), "uncommitted indexed insert failed");
+    }
+
+    Database recovered(root, "school");
+    std::vector<TableRow> table_rows = recovered.scan_rows("student");
+    require(table_rows.size() == 1, "recovery did not undo uncommitted indexed row");
+    std::optional<std::vector<TableRow>> committed_rows = recovered.find_rows_by_index("student", "id", Value::integer_value(1));
+    require(committed_rows.has_value() && committed_rows->size() == 1, "committed index entry missing after recovery");
+    std::optional<std::vector<TableRow>> uncommitted_rows = recovered.find_rows_by_index("student", "id", Value::integer_value(2));
+    require(uncommitted_rows.has_value() && uncommitted_rows->empty(), "uncommitted index entry survived recovery");
+
+    std::filesystem::remove_all(root);
+}
+
+void failed_statement_aborts_explicit_transaction() {
+    const std::filesystem::path root = temp_path("transaction_failed_statement");
+    std::filesystem::remove_all(root);
+
+    Database database(root, "school");
+    require(database.create_database(), "create database failed");
+    require(database.create_table(student_schema()), "create table failed");
+    require(database.create_index("student", "idx_student_id", "id", true), "create index failed");
+    require(database.insert_row("student", Row({
+        Value::integer_value(1),
+        Value::varstring_value("alice"),
+        Value::null_value(),
+    })).has_value(), "initial insert failed");
+
+    require(database.begin_transaction(), "begin failed");
+    require(!database.insert_row("student", Row({
+        Value::integer_value(1),
+        Value::varstring_value("duplicate"),
+        Value::null_value(),
+    })).has_value(), "duplicate insert did not fail");
+    require(!database.insert_row("student", Row({
+        Value::integer_value(2),
+        Value::varstring_value("bob"),
+        Value::null_value(),
+    })).has_value(), "aborted transaction accepted later write");
+    require(!database.commit_transaction(), "aborted transaction committed");
+    require(database.rollback_transaction(), "rollback after failed transaction failed");
+
+    std::vector<TableRow> rows = database.scan_rows("student");
+    require(rows.size() == 1, "failed transaction changed table rows");
+    require(rows[0].row.value(1)->string_data() == "alice", "failed transaction changed committed row");
+
+    std::filesystem::remove_all(root);
+}
+
 void deadlock_schedule_times_out_cleanly() {
     const std::filesystem::path root = temp_path("transaction_deadlock_timeout");
     std::filesystem::remove_all(root);
@@ -516,6 +699,8 @@ int main() {
     std::vector<TestCase> tests;
     tests.push_back({"database create", create_database_and_table});
     tests.push_back({"database insert/read", insert_and_read_row});
+    tests.push_back({"database index", create_and_use_unique_index});
+    tests.push_back({"database memory table", memory_table_crud_uses_ram_storage});
     tests.push_back({"database update/delete", update_and_delete_row});
     tests.push_back({"database scan", scan_rows});
     tests.push_back({"database bad row", reject_bad_row});
@@ -528,6 +713,9 @@ int main() {
     tests.push_back({"database no dirty reads", transaction_read_cannot_see_uncommitted_insert_update_delete});
     tests.push_back({"database rollback isolation", rollback_does_not_affect_committed_work});
     tests.push_back({"database recovery undo tx", recovery_undoes_uncommitted_explicit_transaction});
+    tests.push_back({"database index page recovery", recovery_restores_committed_index_pages});
+    tests.push_back({"database indexed undo recovery", recovery_undoes_uncommitted_index_entries});
+    tests.push_back({"database failed statement aborts tx", failed_statement_aborts_explicit_transaction});
     tests.push_back({"database deadlock timeout", deadlock_schedule_times_out_cleanly});
 
     return run_tests(tests);

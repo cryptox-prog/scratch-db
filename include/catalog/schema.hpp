@@ -6,6 +6,11 @@
 
 #include "catalog/column.hpp"
 
+enum class TableStorageMode {
+    disk,
+    memory,
+};
+
 struct ConstraintDefinition {
     uint64_t id = 0;
     std::string kind;
@@ -21,14 +26,30 @@ struct ConstraintDefinition {
     static ConstraintDefinition from_serialized(const std::string& text);
 };
 
+struct IndexDefinition {
+    uint64_t id = 0;
+    std::string name;
+    std::vector<std::string> columns;
+    bool unique = false;
+
+    static IndexDefinition make(uint64_t index_id, std::string name, std::vector<std::string> columns, bool unique);
+
+    std::string serialized() const;
+    static IndexDefinition from_serialized(const std::string& text);
+};
+
 class Schema {
 public:
     Schema(std::string table_name, std::vector<Column> columns);
     Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints);
+    Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints, std::vector<IndexDefinition> indexes);
+    Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints, std::vector<IndexDefinition> indexes, TableStorageMode storage_mode);
 
     const std::string& table_name() const;
     const std::vector<Column>& columns() const;
     const std::vector<ConstraintDefinition>& constraints() const;
+    const std::vector<IndexDefinition>& indexes() const;
+    TableStorageMode storage_mode() const;
     uint16_t column_count() const;
 
     const Column* column(uint16_t column_index) const;
@@ -38,6 +59,8 @@ public:
     bool set_table_name(const std::string& table_name);
     bool set_columns(const std::vector<Column>& columns);
     bool set_constraints(const std::vector<ConstraintDefinition>& constraints);
+    bool set_indexes(const std::vector<IndexDefinition>& indexes);
+    bool set_storage_mode(TableStorageMode storage_mode);
 
     bool is_valid() const;
 
@@ -47,4 +70,6 @@ private:
     std::string table_name_;
     std::vector<Column> columns_;
     std::vector<ConstraintDefinition> constraints_;
+    std::vector<IndexDefinition> indexes_;
+    TableStorageMode storage_mode_ = TableStorageMode::disk;
 };

@@ -39,6 +39,7 @@ add_library(db_engine
     src/record/value.cpp
     src/storage/page.cpp
     src/storage/page_cache.cpp
+    src/storage/index_file.cpp
     src/storage/table_file.cpp
     src/storage/wal_manager.cpp
 )
@@ -50,6 +51,11 @@ add_executable(db_cli
     src/main.cpp
 )
 target_link_libraries(db_cli PRIVATE db_engine)
+
+add_executable(db_server
+    src/server.cpp
+)
+target_link_libraries(db_server PRIVATE db_engine)
 
 # Copy data folder from soruce dir to build dir
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
@@ -75,6 +81,12 @@ add_executable(page_cache_tests
 )
 target_link_libraries(page_cache_tests PRIVATE db_engine)
 add_test(NAME PageCacheTests COMMAND page_cache_tests)
+
+add_executable(index_file_tests
+    tests/index_file_test.cpp
+)
+target_link_libraries(index_file_tests PRIVATE db_engine)
+add_test(NAME IndexFileTests COMMAND index_file_tests)
 
 add_executable(wal_manager_tests
     tests/wal_manager_test.cpp
@@ -135,3 +147,9 @@ add_executable(table_printer_tests
 )
 target_link_libraries(table_printer_tests PRIVATE db_engine)
 add_test(NAME TablePrinterTests COMMAND table_printer_tests)
+
+add_executable(server_tests
+    tests/server_test.cpp
+)
+target_link_libraries(server_tests PRIVATE db_engine)
+add_test(NAME ServerTests COMMAND server_tests)

@@ -19,6 +19,58 @@ void parse_create_table() {
     require(query->columns[1].precision() == 4 && query->columns[1].scale() == 2, "number format missing");
 }
 
+void parse_create_index() {
+    std::optional<ParsedQuery> query = QueryParser::parse("CREATE INDEX idx_items_id ON items (id)");
+    require(query.has_value(), "create index did not parse");
+    require(query->type == QueryType::create_index, "wrong create index type");
+    require(query->index_name == "idx_items_id", "wrong index name");
+    require(query->table_name == "items", "wrong index table");
+    require(query->index_column == "id", "wrong index column");
+    require(!query->unique_index, "plain index marked unique");
+
+    query = QueryParser::parse("CREATE UNIQUE INDEX idx_items_name ON items (name)");
+    require(query.has_value(), "create unique index did not parse");
+    require(query->unique_index, "unique index flag missing");
+}
+
+void parse_drop_and_show_indexes() {
+    std::optional<ParsedQuery> query = QueryParser::parse("DROP TABLE items");
+    require(query.has_value(), "drop table did not parse");
+    require(query->type == QueryType::drop_table, "wrong drop table type");
+    require(query->table_name == "items", "wrong drop table name");
+
+    query = QueryParser::parse("DROP DATABASE shop");
+    require(query.has_value(), "drop database did not parse");
+    require(query->type == QueryType::drop_database, "wrong drop database type");
+    require(query->database_name == "shop", "wrong drop database name");
+
+    query = QueryParser::parse("DROP INDEX idx_items_id ON items");
+    require(query.has_value(), "drop index did not parse");
+    require(query->type == QueryType::drop_index, "wrong drop index type");
+    require(query->index_name == "idx_items_id", "wrong drop index name");
+    require(query->table_name == "items", "wrong drop index table");
+
+    query = QueryParser::parse("SHOW INDEXES FROM items");
+    require(query.has_value(), "show indexes did not parse");
+    require(query->type == QueryType::show_indexes, "wrong show indexes type");
+    require(query->table_name == "items", "wrong show indexes table");
+}
+
+void parse_create_table_if_not_exists() {
+    const std::optional<ParsedQuery> query = QueryParser::parse("CREATE TABLE IF NOT EXISTS items (id INTEGER NOT NULL)");
+    require(query.has_value(), "create table if not exists did not parse");
+    require(query->type == QueryType::create_table, "wrong if not exists type");
+    require(query->if_not_exists, "if not exists flag missing");
+}
+
+void parse_create_memory_table() {
+    const std::optional<ParsedQuery> query = QueryParser::parse("CREATE TABLE cache (id INTEGER NOT NULL, value TEXT) ENGINE = MEMORY");
+    require(query.has_value(), "create memory table did not parse");
+    require(query->type == QueryType::create_table, "wrong memory table type");
+    require(query->table_name == "cache", "wrong memory table name");
+    require(query->storage_mode == TableStorageMode::memory, "memory storage mode missing");
+}
+
 void reject_lowercase_keywords() {
     require(!QueryParser::parse("select * from items").has_value(), "lowercase query accepted");
 }
@@ -112,6 +164,19 @@ void parse_multi_row_insert() {
     require(query->insert_value_rows[1] == "2, 'book'", "second row values wrong");
 }
 
+void parse_insert_select() {
+    const std::optional<ParsedQuery> query = QueryParser::parse(
+        "INSERT INTO archived_items (id, name) SELECT id, name FROM items WHERE id > 1"
+    );
+    require(query.has_value(), "insert select did not parse");
+    require(query->type == QueryType::insert_row, "wrong insert select type");
+    require(query->table_name == "archived_items", "wrong insert select table");
+    require(query->insert_columns.size() == 2, "insert select target columns wrong");
+    require(query->insert_select != nullptr, "insert select query missing");
+    require(query->insert_select->type == QueryType::select_all, "insert select source type wrong");
+    require(query->insert_select->table_name == "items", "insert select source table wrong");
+}
+
 void report_lowercase_keyword() {
     const ParseResult result = QueryParser::parse_with_error("select * FROM items");
     require(!result.ok(), "bad query accepted");
@@ -137,7 +202,7 @@ void report_bad_column_definition() {
 void report_bad_create_keyword() {
     const ParseResult result = QueryParser::parse_with_error("CREATE DATABSE db1");
     require(!result.ok(), "bad create query accepted");
-    require(result.error->message == "expected DATABASE or TABLE", "wrong create keyword error");
+    require(result.error->message == "expected DATABASE, TABLE, or INDEX", "wrong create keyword error");
     require(result.error->token == "DATABSE", "wrong create keyword token");
     require(result.error->position == 7, "wrong create keyword position");
 }
@@ -159,6 +224,15 @@ void parse_where_and_or() {
     require(query->condition->type == QueryConditionNodeType::or_node, "or should be root");
     require(query->condition->left->condition.left_expression.column_name == "id", "left condition wrong");
     require(query->condition->right->type == QueryConditionNodeType::and_node, "and should bind tighter");
+}
+
+void parse_between_condition() {
+    const std::optional<ParsedQuery> query = QueryParser::parse("SELECT * FROM items WHERE id BETWEEN 3 AND 7");
+    require(query.has_value(), "between query did not parse");
+    require(query->condition != nullptr, "between condition missing");
+    require(query->condition->type == QueryConditionNodeType::and_node, "between did not become and node");
+    require(query->condition->left->condition.op == QueryOperator::greater_equal, "between lower op wrong");
+    require(query->condition->right->condition.op == QueryOperator::less_equal, "between upper op wrong");
 }
 
 void parse_grouped_where_conditions() {
@@ -230,6 +304,17 @@ void parse_qualified_select_column() {
     require(query->selected_columns.size() == 1, "selected column count wrong");
     require(query->selected_columns[0].table_alias == "a", "qualified alias missing");
     require(query->selected_columns[0].column_name == "id", "qualified column name wrong");
+}
+
+void parse_scalar_select_functions() {
+    const std::optional<ParsedQuery> query = QueryParser::parse("SELECT LENGTH(a.name) AS size, UPPER(name), LOWER(name) FROM items AS a");
+    require(query.has_value(), "scalar function select did not parse");
+    require(query->selected_columns.size() == 3, "scalar function column count wrong");
+    require(query->selected_columns[0].scalar_function == QueryScalarFunction::length, "length function missing");
+    require(query->selected_columns[0].table_alias == "a", "length qualifier missing");
+    require(query->selected_columns[0].alias == "size", "length alias wrong");
+    require(query->selected_columns[1].scalar_function == QueryScalarFunction::upper, "upper function missing");
+    require(query->selected_columns[2].scalar_function == QueryScalarFunction::lower, "lower function missing");
 }
 
 void parse_column_alias() {
@@ -393,23 +478,30 @@ void report_missing_number_format() {
 int main() {
     std::vector<TestCase> tests;
     tests.push_back({"parser create table", parse_create_table});
+    tests.push_back({"parser create index", parse_create_index});
+    tests.push_back({"parser drop and show indexes", parse_drop_and_show_indexes});
+    tests.push_back({"parser create table if not exists", parse_create_table_if_not_exists});
+    tests.push_back({"parser create memory table", parse_create_memory_table});
     tests.push_back({"parser case strict", reject_lowercase_keywords});
     tests.push_back({"parser transactions", parse_transaction_commands});
     tests.push_back({"parser alter constraints", parse_alter_table_constraints});
     tests.push_back({"parser record ids", parse_record_id_queries});
     tests.push_back({"parser insert column list", parse_insert_column_list});
     tests.push_back({"parser multi row insert", parse_multi_row_insert});
+    tests.push_back({"parser insert select", parse_insert_select});
     tests.push_back({"parser lowercase error", report_lowercase_keyword});
     tests.push_back({"parser parenthesis error", report_missing_parenthesis});
     tests.push_back({"parser column error", report_bad_column_definition});
     tests.push_back({"parser create keyword error", report_bad_create_keyword});
     tests.push_back({"parser select where", parse_select_where});
     tests.push_back({"parser where and or", parse_where_and_or});
+    tests.push_back({"parser between", parse_between_condition});
     tests.push_back({"parser grouped where", parse_grouped_where_conditions});
     tests.push_back({"parser compound selects", parse_compound_selects});
     tests.push_back({"parser table alias", parse_select_table_alias});
     tests.push_back({"parser join variants", parse_join_variants});
     tests.push_back({"parser qualified select", parse_qualified_select_column});
+    tests.push_back({"parser scalar select functions", parse_scalar_select_functions});
     tests.push_back({"parser column alias", parse_column_alias});
     tests.push_back({"parser aggregate and scalar subquery", parse_aggregate_and_scalar_subquery});
     tests.push_back({"parser group by", parse_group_by});

@@ -35,6 +35,13 @@ public:
         const Page& before_page,
         const Page& after_page
     );
+    uint64_t log_page_update_raw(
+        uint64_t transaction_id,
+        const std::string& file_path,
+        uint32_t page_id,
+        const std::vector<uint8_t>& before_image,
+        const std::vector<uint8_t>& after_image
+    );
     uint64_t commit_transaction(uint64_t transaction_id);
     uint64_t abort_transaction(uint64_t transaction_id);
     uint64_t checkpoint(const std::vector<uint64_t>& active_transactions);

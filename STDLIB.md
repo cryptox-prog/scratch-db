@@ -1,26 +1,12 @@
-**Stdlib For Package Substitutions**
-
-- **Readline / linenoise**: `termios` + manual `read()` loop and a simple line editor. Implemented with POSIX `termios.h` and `read()` in [src/main.cpp](src/main.cpp). Rationale: provides raw-mode editing, history and simple key handling without a third-party line-editing library. Limit: POSIX-only (not Windows).
-- **fmt / tabulate / prettytable**: `std::ostream` + `<iomanip>` and hand-rolled table formatting. Implemented in [src/cli/table_printer.cpp](src/cli/table_printer.cpp). Rationale: small, dependency-free formatting sufficient for CLI output; missing advanced features like column wrapping.
-- **boost::filesystem**: `std::filesystem` (C++17). Used across catalog and storage code (e.g. [include/catalog/catalog.hpp](include/catalog/catalog.hpp)). Rationale: standard, portable path and directory utilities since C++17.
-- **spdlog / loggers**: `std::cout` / `std::cerr` with light formatting. See `print_result` in [src/main.cpp](src/main.cpp). Rationale: simple stdout/stderr logging is sufficient for CLI tooling; replaceable by a small logger wrapper if needed.
-- **GoogleTest / Catch2**: in-repo test harness (`tests/test_utils.hpp`). Tests live in `tests/` and call `run_tests(...)`. Rationale: the project ships no third-party test framework; custom harness is minimal and deterministic.
-- **nlohmann/json / protobuf**: custom binary `RecordSerializer` for on-disk row encoding. See [include/record/serializer.hpp](include/record/serializer.hpp) and `src/record/serializer.cpp`. Rationale: C++ has no standard JSON on-disk format; the storage format is a compact binary serializer controlled by the project. Note: judges should review format compatibility and boundaries in code.
-- **SQLite / RocksDB / LMDB**: hand-rolled storage engine + WAL built on POSIX `open`/`pwrite`/`pread`/`fsync`. See `src/storage/table_file.cpp` and `src/storage/wal_manager.cpp`. Rationale: the Zero-Dependency rule forbids bringing in an embedded DB; this project implements the storage layer directly using POSIX I/O primitives.
-- **fs2 / file-lock helpers**: POSIX file operations and `std::mutex` / `std::recursive_mutex` for in-process synchronization. See `src/storage/table_file.cpp` and [include/storage/page_cache.hpp](include/storage/page_cache.hpp). Rationale: file locking semantics are implemented with OS calls and mutexes for correctness in single-process scenarios; cross-process locking is minimal and documented in README.
-- **ANTLR / parser generators**: hand-written SQL tokenizer & parser in `include/query/query_parser.hpp` and `src/query/query_parser.cpp`. Rationale: keeps the parser self-contained and avoids introducing generated sources or external build steps.
-- **Thread pools / advanced concurrency libs**: `std::thread`, `std::mutex`, `std::condition_variable`, `std::chrono`. Used where required across the codebase. Rationale: standard threading primitives are sufficient for the project's concurrency model.
-- **Test timing / helpers**: `std::chrono` and custom test reporting in `tests/test_utils.hpp` (timing, pass/fail, simple table output).
-
-**Build / Runtime Notes**
-
-- Language / standard: C++ with `-std=c++17` (declared in [CMakeLists.txt](CMakeLists.txt)). `std::filesystem` requires C++17 or later.
-- POSIX usage: the project relies on POSIX APIs (`termios.h`, `unistd.h`, `fcntl.h`, `pwrite`/`pread`, `fsync`) for terminal control and durable I/O. This makes the runtime behavior POSIX-oriented; non-POSIX platforms (Windows) will need adaptation.
-- Missing stdlib features: the C++ standard library provides containers, threading, filesystem and formatting helpers via `<iomanip>` and streams, but it does not provide a JSON library, TOML writer, or a test framework. Those gaps are intentionally filled with small, in-repo implementations and are documented above.
-
-**Where I would normally import but did not**
-
-- `readline` / `linenoise`: usually used for rich line editing; replaced to avoid dependencies and to keep control over terminal behavior.
-- `fmt` / `tabulate`: usually for prettier CLI output; replaced because `<iomanip>` and `std::ostream` are sufficient for readable CLI tables here.
-- `nlohmann/json` or `rapidjson`: would normally be used for interchange formats; avoided because storage format is binary and custom to the engine.
-
+1. Normally: readline -> Instead: POSIX `termios` + `read()` (`src/main.cpp`) Reasoning: Provides raw-mode editing, simple history and key handling without an external line-edit dependency; POSIX-only and lacks advanced editing/completion.
+2. Normally: fmt -> Instead: `std::ostream` + `<iomanip>` table formatting (`src/cli/table_printer.cpp`) Reasoning: Dependency-free column and width formatting via `std::setw`/`std::left`; misses `fmt`'s performance and API ergonomics.
+3. Normally: boost::filesystem -> Instead: `std::filesystem` (C++17) (`include/catalog/catalog.hpp`, `src/catalog/catalog.cpp`, `src/storage/*`) Reasoning: Standard path and directory utilities; no external dependency but requires C++17+.
+4. Normally: spdlog -> Instead: `std::cout` / `std::cerr` logging (`src/main.cpp`, CLI code) Reasoning: Simple stdout/stderr is sufficient for a CLI tool and tests; lacks structured sinks and async logging.
+5. Normally: GoogleTest -> Instead: in-repo test harness (`tests/test_utils.hpp`, tests/*.cpp) Reasoning: Minimal harness integrated with `ctest` avoids adding test deps; lacks advanced assertions and fixtures.
+6. Normally: nlohmann/json -> Instead: project binary `RecordSerializer` (`include/record/serializer.hpp`, `src/record/serializer.cpp`) Reasoning: Compact, custom on-disk encoding tailored to rows; non-standard format requires careful audit for bounds and compatibility.
+7. Normally: sqlite3 -> Instead: hand-rolled storage engine + WAL using POSIX I/O (`src/storage/table_file.cpp`, `src/storage/wal_manager.cpp`, `src/storage/page_cache.cpp`) Reasoning: Implements persistence and WAL without embedding a DB; correctness and durability are the project's responsibility.
+8. Normally: fs2 -> Instead: POSIX file ops + `std::mutex`/`std::recursive_mutex` (`src/storage/table_file.cpp`, `include/storage/page_cache.hpp`) Reasoning: In-process synchronization and explicit POSIX file handling; cross-process locking is limited.
+9. Normally: ANTLR -> Instead: hand-written SQL tokenizer & parser (`include/query/query_parser.hpp`, `src/query/query_parser.cpp`) Reasoning: Self-contained parser avoids generated sources; requires thorough tests to cover SQL edge cases.
+10. Normally: cpp-httplib -> Instead: POSIX sockets + manual HTTP handling (`src/server.cpp`, `tests/server_test.cpp`) Reasoning: Minimal HTTP server for tests built on sockets and threads; acceptable for testing but not production-grade.
+11. Normally: RE2 -> Instead: hand-rolled tokenization (`include/query/query_parser.hpp`, `src/query/query_parser.cpp`) Reasoning: SQL tokenization is implemented with deterministic character-based logic; a regex engine would be heavier and unnecessary for this grammar.
+12. Normally: boost::asio -> Instead: POSIX sockets + `std::thread` (`src/server.cpp`) Reasoning: The server uses raw sockets and detached threads for simplicity and zero-dep operation; `boost::asio` provides richer I/O facilities but would add a large dependency.

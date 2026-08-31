@@ -163,12 +163,54 @@ ConstraintDefinition ConstraintDefinition::from_serialized(const std::string& te
     return constraint;
 }
 
+IndexDefinition IndexDefinition::make(uint64_t index_id, std::string name, std::vector<std::string> columns, bool unique) {
+    IndexDefinition index;
+    index.id = index_id;
+    index.name = std::move(name);
+    index.columns = std::move(columns);
+    index.unique = unique;
+    return index;
+}
+
+std::string IndexDefinition::serialized() const {
+    std::string text = std::to_string(id) + "|" + name + "|" + (unique ? "1" : "0") + "|";
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        if (i > 0) {
+            text += ",";
+        }
+        text += columns[i];
+    }
+    return text;
+}
+
+IndexDefinition IndexDefinition::from_serialized(const std::string& text) {
+    IndexDefinition index;
+    std::size_t first = text.find('|');
+    std::size_t second = first == std::string::npos ? std::string::npos : text.find('|', first + 1);
+    std::size_t third = second == std::string::npos ? std::string::npos : text.find('|', second + 1);
+    if (first == std::string::npos || second == std::string::npos || third == std::string::npos) {
+        return index;
+    }
+
+    index.id = static_cast<uint64_t>(std::stoull(text.substr(0, first)));
+    index.name = text.substr(first + 1, second - first - 1);
+    index.unique = text.substr(second + 1, third - second - 1) == "1";
+    index.columns = split_csv(text.substr(third + 1));
+    return index;
+}
+
 /// @brief Constructor for schema
 /// @param table_name The name to set for the table
 /// @param columns The vector of columns for the table
 Schema::Schema(std::string table_name, std::vector<Column> columns) : Schema(std::move(table_name), std::move(columns), {}) {}
 
-Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints) {
+Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints)
+    : Schema(std::move(table_name), std::move(columns), std::move(constraints), {}) {}
+
+Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints, std::vector<IndexDefinition> indexes)
+    : Schema(std::move(table_name), std::move(columns), std::move(constraints), std::move(indexes), TableStorageMode::disk) {}
+
+Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<ConstraintDefinition> constraints, std::vector<IndexDefinition> indexes, TableStorageMode storage_mode) {
     if (!set_table_name(table_name)) {
         throw std::invalid_argument("invalid table name");
     }
@@ -177,6 +219,12 @@ Schema::Schema(std::string table_name, std::vector<Column> columns, std::vector<
     }
     if (!set_constraints(constraints)) {
         throw std::invalid_argument("invalid schema constraints");
+    }
+    if (!set_indexes(indexes)) {
+        throw std::invalid_argument("invalid schema indexes");
+    }
+    if (!set_storage_mode(storage_mode)) {
+        throw std::invalid_argument("invalid storage mode");
     }
 }
 
@@ -194,6 +242,14 @@ const std::vector<Column>& Schema::columns() const {
 
 const std::vector<ConstraintDefinition>& Schema::constraints() const {
     return constraints_;
+}
+
+const std::vector<IndexDefinition>& Schema::indexes() const {
+    return indexes_;
+}
+
+TableStorageMode Schema::storage_mode() const {
+    return storage_mode_;
 }
 
 /// @brief The number of columns in the schma
@@ -307,6 +363,30 @@ bool Schema::set_constraints(const std::vector<ConstraintDefinition>& constraint
         }
     }
     constraints_ = constraints;
+    return true;
+}
+
+bool Schema::set_indexes(const std::vector<IndexDefinition>& indexes) {
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        const IndexDefinition& index = indexes[i];
+        if (index.id == 0 || !Column::is_valid_name(index.name) || index.columns.size() != 1) {
+            return false;
+        }
+        if (column_index(index.columns[0]) < 0) {
+            return false;
+        }
+        for (std::size_t j = i + 1; j < indexes.size(); ++j) {
+            if (index.id == indexes[j].id || index.name == indexes[j].name) {
+                return false;
+            }
+        }
+    }
+    indexes_ = indexes;
+    return true;
+}
+
+bool Schema::set_storage_mode(TableStorageMode storage_mode) {
+    storage_mode_ = storage_mode;
     return true;
 }
 

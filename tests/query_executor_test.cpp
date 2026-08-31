@@ -76,6 +76,62 @@ void execute_multi_row_insert() {
     std::filesystem::remove_all(root);
 }
 
+void insert_select_executes() {
+    const std::filesystem::path root = test_root("query_executor_insert_select_statement");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create source table failed");
+    require(executor.execute("CREATE TABLE archived_items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create target table failed");
+    require(executor.execute("INSERT INTO items VALUES (1, 'pen'), (2, 'book'), (3, 'pencil')").ok(), "source insert failed");
+
+    QueryResult result = executor.execute("INSERT INTO archived_items (id, name) SELECT id, name FROM items WHERE id > 1");
+    require(result.ok(), "insert select failed");
+    require(result.metadata.row_count == 2, "insert select row count wrong");
+
+    result = executor.execute("SELECT * FROM archived_items ORDER BY id");
+    require(result.ok(), "select archive failed");
+    require(result.rows.size() == 2, "archive select count wrong");
+    require(result.rows[0][0] == "2" && result.rows[1][1] == "pencil", "archive rows wrong");
+
+    std::filesystem::remove_all(root);
+}
+
+void ddl_surface_commands_execute() {
+    const std::filesystem::path root = test_root("query_executor_ddl_surface");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create table if not exists failed");
+    QueryResult result = executor.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)");
+    require(result.ok(), "second create table if not exists failed");
+    require(result.metadata.message == "table already exists", "wrong if not exists message");
+
+    require(executor.execute("CREATE INDEX idx_items_id ON items (id)").ok(), "create index failed");
+    result = executor.execute("SHOW INDEXES FROM items");
+    require(result.ok(), "show indexes failed");
+    require(result.rows.size() == 1, "show indexes count wrong");
+    require(result.rows[0][1] == "idx_items_id" && result.rows[0][2] == "id", "show indexes row wrong");
+
+    require(executor.execute("DROP INDEX idx_items_id ON items").ok(), "drop index failed");
+    result = executor.execute("SHOW INDEXES FROM items");
+    require(result.ok(), "show indexes after drop failed");
+    require(result.rows.empty(), "index remained after drop");
+
+    require(executor.execute("DROP TABLE items").ok(), "drop table failed");
+    result = executor.execute("SHOW TABLES");
+    require(result.ok(), "show tables after drop failed");
+    require(result.rows.empty(), "table remained after drop");
+
+    require(executor.execute("DROP DATABASE db").ok(), "drop database failed");
+    result = executor.execute("SHOW TABLES");
+    require(!result.ok(), "selected database survived drop");
+
+    std::filesystem::remove_all(root);
+}
+
 void execute_exit_returns_false() {
     QueryExecutor executor(test_root("query_executor_exit"));
     require(executor.execute("EXIT").should_exit, "exit did not stop executor");
@@ -259,6 +315,40 @@ void select_where_filters_rows() {
     require(result.ok(), "select string where failed");
     require(result.rows.size() == 1, "select string where row count wrong");
     require(result.rows[0][2] == "book", "select string where wrong row");
+
+    std::filesystem::remove_all(root);
+}
+
+void indexed_range_where_filters_rows() {
+    const std::filesystem::path root = test_root("query_executor_index_range");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create table failed");
+    for (int i = 0; i < 160; ++i) {
+        require(executor.execute("INSERT INTO items VALUES (" + std::to_string(i) + ", 'item')").ok(), "insert failed");
+    }
+    require(executor.execute("CREATE INDEX idx_items_id ON items (id)").ok(), "create index failed");
+
+    QueryResult result = executor.execute("SELECT * FROM items WHERE id > 156");
+    require(result.ok(), "indexed greater query failed");
+    require(result.rows.size() == 3, "indexed greater row count wrong");
+    require(result.rows[0][0] == "157" && result.rows[2][0] == "159", "indexed greater bounds wrong");
+
+    result = executor.execute("SELECT * FROM items WHERE id <= 2");
+    require(result.ok(), "indexed less equal query failed");
+    require(result.rows.size() == 3, "indexed less equal row count wrong");
+    require(result.rows[0][0] == "0" && result.rows[2][0] == "2", "indexed less equal bounds wrong");
+
+    result = executor.execute("SELECT * FROM items WHERE id = 42");
+    require(result.ok(), "indexed equality query failed");
+    require(result.rows.size() == 1 && result.rows[0][0] == "42", "indexed equality wrong");
+
+    result = executor.execute("SELECT * FROM items WHERE id BETWEEN 10 AND 13");
+    require(result.ok(), "indexed between query failed");
+    require(result.rows.size() == 4, "indexed between row count wrong");
+    require(result.rows[0][0] == "10" && result.rows[3][0] == "13", "indexed between bounds wrong");
 
     std::filesystem::remove_all(root);
 }
@@ -511,6 +601,11 @@ void aggregate_and_scalar_subquery_executes() {
     require(result.ok(), "scalar subquery failed");
     require(result.rows.size() == 1, "scalar subquery row count wrong");
     require(result.rows[0][0] == "3", "scalar subquery selected wrong row");
+
+    result = executor.execute("SELECT COUNT(*) FROM current_items");
+    require(result.ok(), "count star failed");
+    require(result.rows.size() == 1, "count star row count wrong");
+    require(result.rows[0][0] == "3", "count star value wrong");
 
     std::filesystem::remove_all(root);
 }
@@ -822,10 +917,69 @@ void cartesian_and_join_queries_run() {
     require(result.rows[0][0] == "1", "qualified join select first row wrong");
     require(result.rows[1][0] == "2", "qualified join select second row wrong");
 
+    require(executor.execute("CREATE INDEX idx_right_items_id ON right_items (id)").ok(), "create right index failed");
+    result = executor.execute("SELECT left_items.name, right_items.name FROM left_items JOIN right_items ON left_items.id = right_items.id");
+    require(result.ok(), "indexed equality join failed");
+    require(result.rows.size() == 2, "indexed equality join row count wrong");
+    require(result.rows[0][0] == "pen" && result.rows[0][1] == "pen", "indexed equality join first row wrong");
+    require(result.rows[1][0] == "book" && result.rows[1][1] == "book", "indexed equality join second row wrong");
+
     result = executor.execute("SELECT id FROM left_items JOIN right_items ON left_items.id = right_items.id");
     require(!result.ok(), "ambiguous join select accepted");
     require(result.error->message == "ambiguous selected column", "wrong ambiguous selected column error");
     require(result.error->token == "id", "wrong ambiguous selected column token");
+
+    std::filesystem::remove_all(root);
+}
+
+void scalar_select_functions_run() {
+    const std::filesystem::path root = test_root("query_executor_scalar_functions");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16))").ok(), "create table failed");
+    require(executor.execute("INSERT INTO items VALUES (1, 'Pen')").ok(), "insert item failed");
+
+    QueryResult result = executor.execute("SELECT LENGTH(i.name) AS size, UPPER(i.name) AS loud, LOWER(i.name) AS quiet FROM items AS i");
+    require(result.ok(), "scalar function select failed");
+    require(result.columns.size() == 3, "scalar function column count wrong");
+    require(result.columns[0].name == "size" && result.columns[0].type == "integer", "length metadata wrong");
+    require(result.rows.size() == 1, "scalar function row count wrong");
+    require(result.rows[0][0] == "3", "length result wrong");
+    require(result.rows[0][1] == "PEN", "upper result wrong");
+    require(result.rows[0][2] == "pen", "lower result wrong");
+
+    std::filesystem::remove_all(root);
+}
+
+void memory_table_sql_executes() {
+    const std::filesystem::path root = test_root("query_executor_memory_table");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE cache (id INTEGER NOT NULL, value TEXT) ENGINE = MEMORY").ok(), "create memory table failed");
+    require(executor.execute("CREATE UNIQUE INDEX idx_cache_id ON cache (id)").ok(), "create memory index failed");
+    require(executor.execute("INSERT INTO cache VALUES (1, 'one')").ok(), "memory insert failed");
+    require(!executor.execute("INSERT INTO cache VALUES (1, 'duplicate')").ok(), "memory unique index allowed duplicate");
+
+    QueryResult result = executor.execute("SELECT * FROM cache WHERE id = 1");
+    require(result.ok(), "memory select failed");
+    require(result.rows.size() == 1, "memory select row count wrong");
+    require(result.rows[0][1] == "one", "memory select row wrong");
+
+    result = executor.execute("UPDATE cache SET value = 'two' WHERE id = 1");
+    require(result.ok(), "memory update failed");
+    require(result.metadata.row_count == 1, "memory update count wrong");
+    result = executor.execute("SELECT value FROM cache WHERE id = 1");
+    require(result.ok() && result.rows.size() == 1 && result.rows[0][0] == "two", "memory update value wrong");
+
+    result = executor.execute("DELETE FROM cache WHERE id = 1");
+    require(result.ok(), "memory delete failed");
+    require(result.metadata.row_count == 1, "memory delete count wrong");
+    result = executor.execute("SELECT * FROM cache");
+    require(result.ok() && result.rows.empty(), "memory delete left rows");
 
     std::filesystem::remove_all(root);
 }
@@ -854,6 +1008,8 @@ int main() {
     std::vector<TestCase> tests;
     tests.push_back({"executor insert select", execute_insert_and_select});
     tests.push_back({"executor multi row insert", execute_multi_row_insert});
+    tests.push_back({"executor insert select statement", insert_select_executes});
+    tests.push_back({"executor ddl surface", ddl_surface_commands_execute});
     tests.push_back({"executor exit", execute_exit_returns_false});
     tests.push_back({"executor invalid query", invalid_query_returns_error});
     tests.push_back({"executor duplicate database", duplicate_database_returns_specific_error});
@@ -863,6 +1019,7 @@ int main() {
     tests.push_back({"executor alter bad data", alter_table_rejects_existing_bad_data});
     tests.push_back({"executor alter rollback", alter_table_rolls_back_in_transaction});
     tests.push_back({"executor select where", select_where_filters_rows});
+    tests.push_back({"executor indexed range where", indexed_range_where_filters_rows});
     tests.push_back({"executor delete where", delete_where_removes_matching_rows});
     tests.push_back({"executor update where", update_where_changes_matching_rows});
     tests.push_back({"executor insert value error", insert_value_error_points_to_literal});
@@ -883,6 +1040,8 @@ int main() {
     tests.push_back({"executor correlated subqueries", correlated_subqueries_execute});
     tests.push_back({"executor chained join", chained_join_executes});
     tests.push_back({"executor join queries", cartesian_and_join_queries_run});
+    tests.push_back({"executor scalar select functions", scalar_select_functions_run});
+    tests.push_back({"executor memory table", memory_table_sql_executes});
     tests.push_back({"executor table alias", select_table_alias_runs});
     return run_tests(tests);
 }

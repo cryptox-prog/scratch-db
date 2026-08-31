@@ -209,10 +209,14 @@ namespace {
             return false;
         }
 
-        Page page = page_from_image(image);
-        page.set_page_lsn(page_lsn);
+        std::vector<uint8_t> output = image;
+        if (std::filesystem::path(record.table_file).filename() == TABLE_FILE_NAME) {
+            Page page = page_from_image(image);
+            page.set_page_lsn(page_lsn);
+            output.assign(page.data(), page.data() + BYTE_SIZES::PAGE_SIZE);
+        }
         const off_t offset = static_cast<off_t>(record.page_id) * static_cast<off_t>(BYTE_SIZES::PAGE_SIZE);
-        const bool ok = full_write_at(fd, page.data(), BYTE_SIZES::PAGE_SIZE, offset);
+        const bool ok = full_write_at(fd, output.data(), BYTE_SIZES::PAGE_SIZE, offset);
         close(fd);
         return ok;
     }
@@ -325,6 +329,28 @@ uint64_t WalManager::log_page_update(
         page_id,
         page_image(before_page),
         page_image(after_page),
+        {}
+    );
+}
+
+uint64_t WalManager::log_page_update_raw(
+    uint64_t transaction_id,
+    const std::string& file_path,
+    uint32_t page_id,
+    const std::vector<uint8_t>& before_image,
+    const std::vector<uint8_t>& after_image
+) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (before_image.size() != BYTE_SIZES::PAGE_SIZE || after_image.size() != BYTE_SIZES::PAGE_SIZE) {
+        return 0;
+    }
+    return append_record(
+        WalRecordType::page_update,
+        transaction_id,
+        file_path,
+        page_id,
+        before_image,
+        after_image,
         {}
     );
 }

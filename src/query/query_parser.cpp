@@ -258,6 +258,9 @@ namespace {
             if (match("CREATE")) {
                 return parse_create();
             }
+            if (match("DROP")) {
+                return parse_drop();
+            }
             if (match("ALTER")) {
                 return parse_alter();
             }
@@ -364,10 +367,29 @@ namespace {
                 query.type = QueryType::show_tables;
                 return end_or_error(query);
             }
-            return expected("DATABASES or TABLES");
+            if (match("INDEXES")) {
+                query.type = QueryType::show_indexes;
+                if (!match("FROM")) {
+                    return expected("FROM");
+                }
+                ParseResult table = read_identifier(query.table_name, "table name");
+                if (!table.ok() && table.error.has_value()) {
+                    return table;
+                }
+                return end_or_error(query);
+            }
+            return expected("DATABASES, TABLES, or INDEXES");
         }
 
         ParseResult parse_create() {
+            bool unique = false;
+            if (match("UNIQUE")) {
+                unique = true;
+                if (!match("INDEX")) {
+                    return expected("INDEX");
+                }
+                return parse_create_index(unique);
+            }
             if (match("DATABASE")) {
                 ParsedQuery query;
                 query.type = QueryType::create_database;
@@ -380,7 +402,74 @@ namespace {
             if (match("TABLE")) {
                 return parse_create_table();
             }
-            return expected("DATABASE or TABLE");
+            if (match("INDEX")) {
+                return parse_create_index(unique);
+            }
+            return expected("DATABASE, TABLE, or INDEX");
+        }
+
+        ParseResult parse_drop() {
+            ParsedQuery query;
+            if (match("DATABASE")) {
+                query.type = QueryType::drop_database;
+                ParseResult name = read_identifier(query.database_name, "database name");
+                if (!name.ok() && name.error.has_value()) {
+                    return name;
+                }
+                return end_or_error(query);
+            }
+            if (match("TABLE")) {
+                query.type = QueryType::drop_table;
+                ParseResult name = read_identifier(query.table_name, "table name");
+                if (!name.ok() && name.error.has_value()) {
+                    return name;
+                }
+                return end_or_error(query);
+            }
+            if (match("INDEX")) {
+                query.type = QueryType::drop_index;
+                ParseResult index_name = read_identifier(query.index_name, "index name");
+                if (!index_name.ok() && index_name.error.has_value()) {
+                    return index_name;
+                }
+                if (!match("ON")) {
+                    return expected("ON");
+                }
+                ParseResult table_name = read_identifier(query.table_name, "table name");
+                if (!table_name.ok() && table_name.error.has_value()) {
+                    return table_name;
+                }
+                return end_or_error(query);
+            }
+            return expected("DATABASE, TABLE, or INDEX");
+        }
+
+        ParseResult parse_create_index(bool unique) {
+            ParsedQuery query;
+            query.type = QueryType::create_index;
+            query.unique_index = unique;
+            ParseResult index_name = read_identifier(query.index_name, "index name");
+            if (!index_name.ok() && index_name.error.has_value()) {
+                return index_name;
+            }
+            if (!match("ON")) {
+                return expected("ON");
+            }
+            ParseResult table_name = read_identifier(query.table_name, "table name");
+            if (!table_name.ok() && table_name.error.has_value()) {
+                return table_name;
+            }
+            if (!match_type(TokenType::left_paren)) {
+                return expected("(");
+            }
+            ParseResult column_name = read_identifier(query.index_column, "column name");
+            if (!column_name.ok() && column_name.error.has_value()) {
+                return column_name;
+            }
+            if (!match_type(TokenType::right_paren)) {
+                return expected(")");
+            }
+            return end_or_error(query);
         }
 
         ParseResult parse_use() {
@@ -546,9 +635,36 @@ namespace {
             return end_or_error(query);
         }
 
+        ParseResult parse_storage_engine(ParsedQuery& query) {
+            if (!match("ENGINE")) {
+                return ParseResult{};
+            }
+            if (!match_type(TokenType::op) || previous() == nullptr || previous()->text != "=") {
+                return expected("=");
+            }
+            if (match("MEMORY")) {
+                query.storage_mode = TableStorageMode::memory;
+                return ParseResult{};
+            }
+            if (match("DISK")) {
+                query.storage_mode = TableStorageMode::disk;
+                return ParseResult{};
+            }
+            return expected("MEMORY or DISK");
+        }
+
         ParseResult parse_create_table() {
             ParsedQuery query;
             query.type = QueryType::create_table;
+            if (match("IF")) {
+                if (!match("NOT")) {
+                    return expected("NOT");
+                }
+                if (!match("EXISTS")) {
+                    return expected("EXISTS");
+                }
+                query.if_not_exists = true;
+            }
             ParseResult name = read_identifier(query.table_name, "table name");
             if (!name.ok() && name.error.has_value()) {
                 return name;
@@ -665,6 +781,10 @@ namespace {
                 return expected(", or )");
             }
 
+            ParseResult storage = parse_storage_engine(query);
+            if (!storage.ok() && storage.error.has_value()) {
+                return storage;
+            }
             return end_or_error(query);
         }
 
@@ -822,8 +942,18 @@ namespace {
                     return expected(")");
                 }
             }
+            if (match("SELECT")) {
+                ParsedQuery select_query;
+                ParseResult select = parse_single_select(select_query);
+                if (!select.ok() && select.error.has_value()) {
+                    return select;
+                }
+                query.insert_select = std::make_unique<ParsedQuery>(select_query);
+                return end_or_error(query);
+            }
+
             if (!match("VALUES")) {
-                return expected("VALUES");
+                return expected("VALUES or SELECT");
             }
 
             while (true) {
@@ -1013,6 +1143,18 @@ namespace {
                     if (!match_type(TokenType::right_paren)) {
                         return expected(")");
                     }
+                } else if (!at_end() && scalar_from_text(tokens_[index_].text, selected.scalar_function)) {
+                    ++index_;
+                    if (!match_type(TokenType::left_paren)) {
+                        return expected("(");
+                    }
+                    ParseResult column = parse_column_reference(selected.table_alias, selected.column_name, "selected column");
+                    if (!column.ok() && column.error.has_value()) {
+                        return column;
+                    }
+                    if (!match_type(TokenType::right_paren)) {
+                        return expected(")");
+                    }
                 } else {
                     ParseResult column = parse_column_reference(selected.table_alias, selected.column_name, "selected column");
                     if (!column.ok() && column.error.has_value()) {
@@ -1054,6 +1196,22 @@ namespace {
             }
             if (text == "COUNT") {
                 aggregate = QueryAggregateFunction::count;
+                return true;
+            }
+            return false;
+        }
+
+        bool scalar_from_text(const std::string& text, QueryScalarFunction& scalar_function) const {
+            if (text == "LENGTH") {
+                scalar_function = QueryScalarFunction::length;
+                return true;
+            }
+            if (text == "UPPER") {
+                scalar_function = QueryScalarFunction::upper;
+                return true;
+            }
+            if (text == "LOWER") {
+                scalar_function = QueryScalarFunction::lower;
                 return true;
             }
             return false;
@@ -1443,6 +1601,46 @@ namespace {
                 return left_column;
             }
 
+            if (match("BETWEEN")) {
+                QueryExpression lower_expression;
+                ParseResult lower = parse_value_expression(lower_expression);
+                if (!lower.ok() && lower.error.has_value()) {
+                    return lower;
+                }
+                if (!match("AND")) {
+                    return expected("AND");
+                }
+                QueryExpression upper_expression;
+                ParseResult upper = parse_value_expression(upper_expression);
+                if (!upper.ok() && upper.error.has_value()) {
+                    return upper;
+                }
+
+                QueryCondition lower_condition;
+                lower_condition.left_expression = result.left_expression;
+                lower_condition.op = QueryOperator::greater_equal;
+                lower_condition.right_expression = std::move(lower_expression);
+
+                QueryCondition upper_condition;
+                upper_condition.left_expression = result.left_expression;
+                upper_condition.op = QueryOperator::less_equal;
+                upper_condition.right_expression = std::move(upper_expression);
+
+                auto lower_node = std::make_unique<QueryConditionNode>();
+                lower_node->type = QueryConditionNodeType::comparison;
+                lower_node->condition = std::move(lower_condition);
+
+                auto upper_node = std::make_unique<QueryConditionNode>();
+                upper_node->type = QueryConditionNodeType::comparison;
+                upper_node->condition = std::move(upper_condition);
+
+                node = std::make_unique<QueryConditionNode>();
+                node->type = QueryConditionNodeType::and_node;
+                node->left = std::move(lower_node);
+                node->right = std::move(upper_node);
+                return ParseResult{};
+            }
+
             if (match("NOT")) {
                 if (!match("IN")) {
                     return expected("IN");
@@ -1751,6 +1949,11 @@ ParsedQuery::ParsedQuery(const ParsedQuery& other)
       table_alias(other.table_alias),
       columns(other.columns),
       constraints(other.constraints),
+      storage_mode(other.storage_mode),
+      index_name(other.index_name),
+      index_column(other.index_column),
+      unique_index(other.unique_index),
+      if_not_exists(other.if_not_exists),
       drop_constraint_id(other.drop_constraint_id),
       insert_columns(other.insert_columns),
       values_text(other.values_text),
@@ -1766,6 +1969,9 @@ ParsedQuery::ParsedQuery(const ParsedQuery& other)
       limit_count(other.limit_count) {
     if (other.derived_table != nullptr) {
         derived_table = std::make_unique<ParsedQuery>(*other.derived_table);
+    }
+    if (other.insert_select != nullptr) {
+        insert_select = std::make_unique<ParsedQuery>(*other.insert_select);
     }
     if (other.condition != nullptr) {
         condition = std::make_unique<QueryConditionNode>(*other.condition);
@@ -1793,8 +1999,14 @@ ParsedQuery& ParsedQuery::operator=(const ParsedQuery& other) {
     derived_table = other.derived_table == nullptr ? nullptr : std::make_unique<ParsedQuery>(*other.derived_table);
     columns = other.columns;
     constraints = other.constraints;
+    storage_mode = other.storage_mode;
+    index_name = other.index_name;
+    index_column = other.index_column;
+    unique_index = other.unique_index;
+    if_not_exists = other.if_not_exists;
     drop_constraint_id = other.drop_constraint_id;
     insert_columns = other.insert_columns;
+    insert_select = other.insert_select == nullptr ? nullptr : std::make_unique<ParsedQuery>(*other.insert_select);
     values_text = other.values_text;
     insert_value_rows = other.insert_value_rows;
     update_assignments = other.update_assignments;
