@@ -237,11 +237,29 @@ namespace {
                 query.type = QueryType::help;
                 return end_or_error(query);
             }
+            if (match("BEGIN")) {
+                ParsedQuery query;
+                query.type = QueryType::begin_transaction;
+                return end_or_error(query);
+            }
+            if (match("COMMIT")) {
+                ParsedQuery query;
+                query.type = QueryType::commit_transaction;
+                return end_or_error(query);
+            }
+            if (match("ROLLBACK")) {
+                ParsedQuery query;
+                query.type = QueryType::rollback_transaction;
+                return end_or_error(query);
+            }
             if (match("SHOW")) {
                 return parse_show();
             }
             if (match("CREATE")) {
                 return parse_create();
+            }
+            if (match("ALTER")) {
+                return parse_alter();
             }
             if (match("USE")) {
                 return parse_use();
@@ -375,6 +393,149 @@ namespace {
             return end_or_error(query);
         }
 
+        ParseResult parse_alter() {
+            if (!match("TABLE")) {
+                return expected("TABLE");
+            }
+
+            ParsedQuery query;
+            query.type = QueryType::alter_table;
+            ParseResult name = read_identifier(query.table_name, "table name");
+            if (!name.ok() && name.error.has_value()) {
+                return name;
+            }
+
+            if (match("ADD")) {
+                std::optional<ConstraintDefinition> constraint;
+                ParseResult parsed_constraint = parse_table_constraint(1, constraint);
+                if (!parsed_constraint.ok() && parsed_constraint.error.has_value()) {
+                    return parsed_constraint;
+                }
+                query.constraints.push_back(*constraint);
+                return end_or_error(query);
+            }
+
+            if (match("DROP")) {
+                if (!match("CONSTRAINT")) {
+                    return expected("CONSTRAINT");
+                }
+                if (at_end() || tokens_[index_].type != TokenType::number) {
+                    return expected("constraint id");
+                }
+                query.drop_constraint_id = static_cast<uint64_t>(std::stoull(tokens_[index_].text));
+                ++index_;
+                return end_or_error(query);
+            }
+
+            return expected("ADD or DROP");
+        }
+
+        ParseResult read_column_list(const std::string& label, std::vector<std::string>& columns) {
+            if (!match_type(TokenType::left_paren)) {
+                return expected("(");
+            }
+            while (true) {
+                std::string column;
+                ParseResult column_result = read_identifier(column, label);
+                if (!column_result.ok() && column_result.error.has_value()) {
+                    return column_result;
+                }
+                columns.push_back(column);
+                if (!match_type(TokenType::comma)) {
+                    break;
+                }
+            }
+            if (!match_type(TokenType::right_paren)) {
+                return expected(")");
+            }
+            return ParseResult{};
+        }
+
+        ParseResult parse_table_constraint(uint64_t constraint_id, std::optional<ConstraintDefinition>& constraint) {
+            if (match("PRIMARY")) {
+                if (!match("KEY")) {
+                    return expected("KEY");
+                }
+                std::vector<std::string> columns;
+                ParseResult column_list = read_column_list("primary key column name", columns);
+                if (!column_list.ok() && column_list.error.has_value()) {
+                    return column_list;
+                }
+                constraint = ConstraintDefinition::make_primary_key(constraint_id, std::move(columns));
+                return ParseResult{};
+            }
+
+            if (match("UNIQUE")) {
+                std::vector<std::string> columns;
+                ParseResult column_list = read_column_list("unique column name", columns);
+                if (!column_list.ok() && column_list.error.has_value()) {
+                    return column_list;
+                }
+                constraint = ConstraintDefinition::make_unique(constraint_id, std::move(columns));
+                return ParseResult{};
+            }
+
+            if (match("FOREIGN")) {
+                if (!match("KEY")) {
+                    return expected("KEY");
+                }
+                std::vector<std::string> columns;
+                ParseResult column_list = read_column_list("foreign key column name", columns);
+                if (!column_list.ok() && column_list.error.has_value()) {
+                    return column_list;
+                }
+                if (columns.size() != 1) {
+                    return fail("foreign key requires one column", columns.empty() ? "" : columns[0], previous() == nullptr ? command_.size() : previous()->position);
+                }
+                if (!match("REFERENCES")) {
+                    return expected("REFERENCES");
+                }
+                std::string ref_table;
+                ParseResult ref_table_result = read_identifier(ref_table, "referenced table name");
+                if (!ref_table_result.ok() && ref_table_result.error.has_value()) {
+                    return ref_table_result;
+                }
+                std::vector<std::string> ref_columns;
+                ParseResult ref_column_list = read_column_list("referenced column name", ref_columns);
+                if (!ref_column_list.ok() && ref_column_list.error.has_value()) {
+                    return ref_column_list;
+                }
+                if (ref_columns.size() != 1) {
+                    return fail("foreign key reference requires one column", ref_columns.empty() ? "" : ref_columns[0], previous() == nullptr ? command_.size() : previous()->position);
+                }
+                constraint = ConstraintDefinition::make_foreign_key(constraint_id, {columns[0]}, ref_table, ref_columns[0]);
+                return ParseResult{};
+            }
+
+            if (match("CHECK")) {
+                if (!match_type(TokenType::left_paren)) {
+                    return expected("(");
+                }
+                std::vector<std::string> check_parts;
+                while (!at_end()) {
+                    const Token* token = peek();
+                    if (token == nullptr || token->type == TokenType::right_paren) {
+                        break;
+                    }
+                    if (token->type == TokenType::word ||
+                        token->type == TokenType::number ||
+                        token->type == TokenType::string ||
+                        token->type == TokenType::op ||
+                        token->type == TokenType::star) {
+                        check_parts.push_back(token->text);
+                    }
+                    ++index_;
+                }
+                if (!match_type(TokenType::right_paren)) {
+                    return expected(")");
+                }
+                constraint = ConstraintDefinition::make_check(constraint_id, std::move(check_parts));
+                return ParseResult{};
+            }
+
+            return expected("constraint");
+        }
+
         ParseResult parse_describe() {
             ParsedQuery query;
             query.type = QueryType::describe_table;
@@ -484,137 +645,14 @@ namespace {
                 if (match_type(TokenType::right_paren)) {
                     break;
                 }
-                if (match("PRIMARY")) {
-                    if (!match("KEY")) {
-                        return expected("KEY");
+                if (peek() != nullptr &&
+                    (peek()->text == "PRIMARY" || peek()->text == "UNIQUE" || peek()->text == "FOREIGN" || peek()->text == "CHECK")) {
+                    std::optional<ConstraintDefinition> constraint;
+                    ParseResult parsed_constraint = parse_table_constraint(constraint_id++, constraint);
+                    if (!parsed_constraint.ok() && parsed_constraint.error.has_value()) {
+                        return parsed_constraint;
                     }
-                    if (!match_type(TokenType::left_paren)) {
-                        return expected("(");
-                    }
-                    std::vector<std::string> pk_columns;
-                    while (true) {
-                        std::string pk_column;
-                        ParseResult column_name = read_identifier(pk_column, "primary key column name");
-                        if (!column_name.ok() && column_name.error.has_value()) {
-                            return column_name;
-                        }
-                        pk_columns.push_back(pk_column);
-                        if (!match_type(TokenType::comma)) {
-                            break;
-                        }
-                    }
-                    if (!match_type(TokenType::right_paren)) {
-                        return expected(")");
-                    }
-                    query.constraints.push_back(ConstraintDefinition::make_primary_key(constraint_id++, std::move(pk_columns)));
-                    if (match_type(TokenType::comma)) {
-                        continue;
-                    }
-                    if (match_type(TokenType::right_paren)) {
-                        break;
-                    }
-                    return expected(", or )");
-                }
-                if (match("UNIQUE")) {
-                    if (!match_type(TokenType::left_paren)) {
-                        return expected("(");
-                    }
-                    std::vector<std::string> unique_columns;
-                    while (true) {
-                        std::string unique_column;
-                        ParseResult column_name = read_identifier(unique_column, "unique column name");
-                        if (!column_name.ok() && column_name.error.has_value()) {
-                            return column_name;
-                        }
-                        unique_columns.push_back(unique_column);
-                        if (!match_type(TokenType::comma)) {
-                            break;
-                        }
-                    }
-                    if (!match_type(TokenType::right_paren)) {
-                        return expected(")");
-                    }
-                    query.constraints.push_back(ConstraintDefinition::make_unique(constraint_id++, std::move(unique_columns)));
-                    if (match_type(TokenType::comma)) {
-                        continue;
-                    }
-                    if (match_type(TokenType::right_paren)) {
-                        break;
-                    }
-                    return expected(", or )");
-                }
-                if (match("FOREIGN")) {
-                    if (!match("KEY")) {
-                        return expected("KEY");
-                    }
-                    if (!match_type(TokenType::left_paren)) {
-                        return expected("(");
-                    }
-                    std::string fk_column;
-                    ParseResult fk_column_result = read_identifier(fk_column, "foreign key column name");
-                    if (!fk_column_result.ok() && fk_column_result.error.has_value()) {
-                        return fk_column_result;
-                    }
-                    if (!match_type(TokenType::right_paren)) {
-                        return expected(")");
-                    }
-                    if (!match("REFERENCES")) {
-                        return expected("REFERENCES");
-                    }
-                    std::string ref_table;
-                    ParseResult ref_table_result = read_identifier(ref_table, "referenced table name");
-                    if (!ref_table_result.ok() && ref_table_result.error.has_value()) {
-                        return ref_table_result;
-                    }
-                    if (!match_type(TokenType::left_paren)) {
-                        return expected("(");
-                    }
-                    std::string ref_column;
-                    ParseResult ref_column_result = read_identifier(ref_column, "referenced column name");
-                    if (!ref_column_result.ok() && ref_column_result.error.has_value()) {
-                        return ref_column_result;
-                    }
-                    if (!match_type(TokenType::right_paren)) {
-                        return expected(")");
-                    }
-                    query.constraints.push_back(ConstraintDefinition::make_foreign_key(constraint_id++, {fk_column}, ref_table, ref_column));
-                    if (match_type(TokenType::comma)) {
-                        continue;
-                    }
-                    if (match_type(TokenType::right_paren)) {
-                        break;
-                    }
-                    return expected(", or )");
-                }
-                if (match("CHECK")) {
-                    if (!match_type(TokenType::left_paren)) {
-                        return expected("(");
-                    }
-                    std::vector<std::string> check_parts;
-                    while (!at_end()) {
-                        const Token* token = peek();
-                        if (token == nullptr) {
-                            return expected(")");
-                        }
-                        if (token->type == TokenType::right_paren) {
-                            break;
-                        }
-                        if (token->type == TokenType::word || token->type == TokenType::number || token->type == TokenType::string || token->type == TokenType::op || token->type == TokenType::star) {
-                            check_parts.push_back(token->text);
-                            ++index_;
-                        } else if (token->type == TokenType::left_paren || token->type == TokenType::comma || token->type == TokenType::dot) {
-                            if (token->type == TokenType::left_paren) {
-                                check_parts.push_back(token->text);
-                            }
-                            ++index_;
-                        } else {
-                            ++index_;
-                        }
-                    }
-                    if (!match_type(TokenType::right_paren)) {
-                        return expected(")");
-                    }
-                    query.constraints.push_back(ConstraintDefinition::make_check(constraint_id++, std::move(check_parts)));
+                    query.constraints.push_back(*constraint);
                     if (match_type(TokenType::comma)) {
                         continue;
                     }
@@ -1713,6 +1751,7 @@ ParsedQuery::ParsedQuery(const ParsedQuery& other)
       table_alias(other.table_alias),
       columns(other.columns),
       constraints(other.constraints),
+      drop_constraint_id(other.drop_constraint_id),
       insert_columns(other.insert_columns),
       values_text(other.values_text),
       insert_value_rows(other.insert_value_rows),
@@ -1754,6 +1793,7 @@ ParsedQuery& ParsedQuery::operator=(const ParsedQuery& other) {
     derived_table = other.derived_table == nullptr ? nullptr : std::make_unique<ParsedQuery>(*other.derived_table);
     columns = other.columns;
     constraints = other.constraints;
+    drop_constraint_id = other.drop_constraint_id;
     insert_columns = other.insert_columns;
     values_text = other.values_text;
     insert_value_rows = other.insert_value_rows;

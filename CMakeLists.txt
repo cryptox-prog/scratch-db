@@ -25,6 +25,7 @@ endif()
 # Common Database engine
 add_library(db_engine
     src/cli/table_printer.cpp
+    src/concurrency/lock_manager.cpp
     src/catalog/catalog.cpp
     src/catalog/column.cpp
     src/catalog/schema.cpp
@@ -80,6 +81,12 @@ add_executable(wal_manager_tests
 )
 target_link_libraries(wal_manager_tests PRIVATE db_engine)
 add_test(NAME WalManagerTests COMMAND wal_manager_tests)
+
+add_executable(lock_manager_tests
+    tests/lock_manager_test.cpp
+)
+target_link_libraries(lock_manager_tests PRIVATE db_engine)
+add_test(NAME LockManagerTests COMMAND lock_manager_tests)
 
 add_executable(catalog_tests
     tests/catalog_test.cpp

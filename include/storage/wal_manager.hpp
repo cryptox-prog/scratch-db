@@ -16,6 +16,7 @@ enum class WalRecordType : uint16_t {
     checkpoint = 5,
     create_table = 6,
     drop_table = 7,
+    schema_update = 8,
 };
 
 class WalManager {
@@ -39,6 +40,12 @@ public:
     uint64_t checkpoint(const std::vector<uint64_t>& active_transactions);
     uint64_t log_create_table(uint64_t transaction_id, const std::filesystem::path& table_dir, const std::string& schema_text);
     uint64_t log_drop_table(uint64_t transaction_id, const std::filesystem::path& table_dir);
+    uint64_t log_schema_update(
+        uint64_t transaction_id,
+        const std::filesystem::path& table_dir,
+        const std::string& before_schema_text,
+        const std::string& after_schema_text
+    );
 
     bool flush();
     bool flush_through(uint64_t lsn);

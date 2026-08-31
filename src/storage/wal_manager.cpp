@@ -257,6 +257,26 @@ namespace {
         std::filesystem::remove_all(std::filesystem::path(record.table_file), error);
         return !error;
     }
+
+    bool write_schema_text(const std::filesystem::path& table_dir, const std::vector<uint8_t>& schema_image) {
+        if (table_dir.empty() || schema_image.empty()) {
+            return false;
+        }
+
+        std::error_code error;
+        std::filesystem::create_directories(table_dir, error);
+        if (error) {
+            return false;
+        }
+
+        std::ofstream schema_file(table_dir / SCHEMA_FILE_NAME, std::ios::binary | std::ios::trunc);
+        if (!schema_file) {
+            return false;
+        }
+        const std::string schema_text = text_from_bytes(schema_image);
+        schema_file.write(schema_text.data(), static_cast<std::streamsize>(schema_text.size()));
+        return static_cast<bool>(schema_file);
+    }
 }  // namespace
 
 WalManager::WalManager(const std::filesystem::path& path) : path_(path) {
@@ -342,6 +362,24 @@ uint64_t WalManager::log_drop_table(uint64_t transaction_id, const std::filesyst
     return append_record(WalRecordType::drop_table, transaction_id, table_dir.lexically_normal().string(), NO_PAGE_ID, {}, {}, {});
 }
 
+uint64_t WalManager::log_schema_update(
+    uint64_t transaction_id,
+    const std::filesystem::path& table_dir,
+    const std::string& before_schema_text,
+    const std::string& after_schema_text
+) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return append_record(
+        WalRecordType::schema_update,
+        transaction_id,
+        table_dir.lexically_normal().string(),
+        NO_PAGE_ID,
+        std::vector<uint8_t>(before_schema_text.begin(), before_schema_text.end()),
+        std::vector<uint8_t>(after_schema_text.begin(), after_schema_text.end()),
+        {}
+    );
+}
+
 bool WalManager::flush() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (fd_ < 0) {
@@ -420,6 +458,10 @@ bool WalManager::recover() {
             if (!redo_drop_table(record)) {
                 return false;
             }
+        } else if (record.type == WalRecordType::schema_update) {
+            if (!write_schema_text(std::filesystem::path(record.table_file), record.after_image)) {
+                return false;
+            }
         }
     }
 
@@ -440,6 +482,16 @@ bool WalManager::recover() {
             }
         } else if (record.type == WalRecordType::create_table) {
             if (log_drop_table(record.transaction_id, record.table_file) == 0 || !redo_drop_table(record)) {
+                return false;
+            }
+        } else if (record.type == WalRecordType::schema_update) {
+            const uint64_t compensation_lsn = log_schema_update(
+                record.transaction_id,
+                record.table_file,
+                text_from_bytes(record.after_image),
+                text_from_bytes(record.before_image)
+            );
+            if (compensation_lsn == 0 || !write_schema_text(std::filesystem::path(record.table_file), record.before_image)) {
                 return false;
             }
         }
@@ -483,6 +535,16 @@ bool WalManager::rollback_transaction(uint64_t transaction_id) {
             }
         } else if (record.type == WalRecordType::create_table) {
             if (log_drop_table(transaction_id, record.table_file) == 0 || !redo_drop_table(record)) {
+                return false;
+            }
+        } else if (record.type == WalRecordType::schema_update) {
+            const uint64_t compensation_lsn = log_schema_update(
+                transaction_id,
+                record.table_file,
+                text_from_bytes(record.after_image),
+                text_from_bytes(record.before_image)
+            );
+            if (compensation_lsn == 0 || !write_schema_text(std::filesystem::path(record.table_file), record.before_image)) {
                 return false;
             }
         }

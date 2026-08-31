@@ -348,6 +348,67 @@ void recovery_undoes_unfinished_create_table() {
     std::remove(wal_path.c_str());
 }
 
+void recovery_redoes_committed_schema_update() {
+    const std::filesystem::path table_dir = temp_path("wal_schema_update");
+    const std::filesystem::path wal_path = temp_path("wal_schema_update.log");
+    std::filesystem::remove_all(table_dir);
+    std::remove(wal_path.c_str());
+    std::filesystem::create_directories(table_dir);
+
+    const std::string before_schema = "table items\ncolumn id integer 0 8 0 0\n";
+    const std::string after_schema = before_schema + "constraint 1|unique|id\n";
+    {
+        std::ofstream schema_file(table_dir / "schema.catalog", std::ios::binary | std::ios::trunc);
+        schema_file << before_schema;
+    }
+    {
+        WalManager wal(wal_path);
+        wal.begin_transaction(100);
+        wal.log_schema_update(100, table_dir, before_schema, after_schema);
+        wal.commit_transaction(100);
+        require(wal.flush(), "schema update wal flush failed");
+    }
+
+    WalManager recovery(wal_path);
+    require(recovery.recover(), "schema update recovery failed");
+    std::ifstream schema_file(table_dir / "schema.catalog", std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(schema_file)), std::istreambuf_iterator<char>());
+    require(text == after_schema, "committed schema update was not redone");
+
+    std::filesystem::remove_all(table_dir);
+    std::remove(wal_path.c_str());
+}
+
+void recovery_undoes_unfinished_schema_update() {
+    const std::filesystem::path table_dir = temp_path("wal_schema_undo");
+    const std::filesystem::path wal_path = temp_path("wal_schema_undo.log");
+    std::filesystem::remove_all(table_dir);
+    std::remove(wal_path.c_str());
+    std::filesystem::create_directories(table_dir);
+
+    const std::string before_schema = "table items\ncolumn id integer 0 8 0 0\n";
+    const std::string after_schema = before_schema + "constraint 1|unique|id\n";
+    {
+        std::ofstream schema_file(table_dir / "schema.catalog", std::ios::binary | std::ios::trunc);
+        schema_file << after_schema;
+    }
+    {
+        WalManager wal(wal_path);
+        wal.begin_transaction(110);
+        wal.log_schema_update(110, table_dir, before_schema, after_schema);
+        require(wal.flush(), "schema update wal flush failed");
+    }
+
+    WalManager recovery(wal_path);
+    require(recovery.recover(), "schema update undo recovery failed");
+    std::ifstream schema_file(table_dir / "schema.catalog", std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(schema_file)), std::istreambuf_iterator<char>());
+    require(text == before_schema, "unfinished schema update was not undone");
+
+    std::filesystem::remove_all(table_dir);
+    std::remove(wal_path.c_str());
+}
+
 void concurrent_wal_appends_get_unique_lsns() {
     const std::filesystem::path wal_path = temp_path("wal_concurrent.log");
     std::remove(wal_path.c_str());
@@ -395,6 +456,8 @@ int main() {
     tests.push_back({"wal rollback", rollback_transaction_restores_pages});
     tests.push_back({"wal redo create table", recovery_redoes_committed_create_table});
     tests.push_back({"wal undo create table", recovery_undoes_unfinished_create_table});
+    tests.push_back({"wal redo schema update", recovery_redoes_committed_schema_update});
+    tests.push_back({"wal undo schema update", recovery_undoes_unfinished_schema_update});
     tests.push_back({"wal concurrent append", concurrent_wal_appends_get_unique_lsns});
     return run_tests(tests);
 }

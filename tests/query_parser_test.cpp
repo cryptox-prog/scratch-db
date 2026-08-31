@@ -23,6 +23,40 @@ void reject_lowercase_keywords() {
     require(!QueryParser::parse("select * from items").has_value(), "lowercase query accepted");
 }
 
+void parse_transaction_commands() {
+    std::optional<ParsedQuery> query = QueryParser::parse("BEGIN");
+    require(query.has_value(), "begin did not parse");
+    require(query->type == QueryType::begin_transaction, "wrong begin type");
+
+    query = QueryParser::parse("COMMIT");
+    require(query.has_value(), "commit did not parse");
+    require(query->type == QueryType::commit_transaction, "wrong commit type");
+
+    query = QueryParser::parse("ROLLBACK");
+    require(query.has_value(), "rollback did not parse");
+    require(query->type == QueryType::rollback_transaction, "wrong rollback type");
+}
+
+void parse_alter_table_constraints() {
+    std::optional<ParsedQuery> query = QueryParser::parse("ALTER TABLE items ADD UNIQUE (name)");
+    require(query.has_value(), "alter unique did not parse");
+    require(query->type == QueryType::alter_table, "wrong alter type");
+    require(query->table_name == "items", "wrong alter table");
+    require(query->constraints.size() == 1, "alter unique missing constraint");
+    require(query->constraints[0].kind == "unique", "wrong alter unique kind");
+
+    query = QueryParser::parse("ALTER TABLE items ADD FOREIGN KEY (category_id) REFERENCES categories(id)");
+    require(query.has_value(), "alter foreign key did not parse");
+    require(query->constraints.size() == 1, "alter foreign key missing constraint");
+    require(query->constraints[0].kind == "foreign_key", "wrong alter fk kind");
+    require(query->constraints[0].columns[0] == "category_id", "wrong alter fk column");
+    require(query->constraints[0].args[0] == "categories", "wrong alter fk table");
+
+    query = QueryParser::parse("ALTER TABLE items DROP CONSTRAINT 7");
+    require(query.has_value(), "alter drop did not parse");
+    require(query->drop_constraint_id.has_value() && *query->drop_constraint_id == 7, "wrong drop constraint id");
+}
+
 void parse_record_id_queries() {
     const std::optional<ParsedQuery> delete_query = QueryParser::parse(
         "DELETE FROM items WHERE id = 12"
@@ -360,6 +394,8 @@ int main() {
     std::vector<TestCase> tests;
     tests.push_back({"parser create table", parse_create_table});
     tests.push_back({"parser case strict", reject_lowercase_keywords});
+    tests.push_back({"parser transactions", parse_transaction_commands});
+    tests.push_back({"parser alter constraints", parse_alter_table_constraints});
     tests.push_back({"parser record ids", parse_record_id_queries});
     tests.push_back({"parser insert column list", parse_insert_column_list});
     tests.push_back({"parser multi row insert", parse_multi_row_insert});

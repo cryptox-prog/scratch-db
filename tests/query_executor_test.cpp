@@ -123,6 +123,118 @@ void duplicate_table_returns_specific_error() {
     std::filesystem::remove_all(root);
 }
 
+void transaction_commands_execute() {
+    const std::filesystem::path root = test_root("query_executor_transactions");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create table failed");
+
+    QueryResult result = executor.execute("BEGIN");
+    require(result.ok(), "begin failed");
+    require(result.metadata.message == "transaction started", "begin message wrong");
+
+    result = executor.execute("INSERT INTO items VALUES (1, 'pen')");
+    require(result.ok(), "transaction insert failed");
+
+    result = executor.execute("ROLLBACK");
+    require(result.ok(), "rollback failed");
+    require(result.metadata.message == "transaction rolled back", "rollback message wrong");
+
+    result = executor.execute("SELECT * FROM items");
+    require(result.ok(), "select after rollback failed");
+    require(result.rows.empty(), "rolled back row was visible");
+
+    require(executor.execute("BEGIN").ok(), "second begin failed");
+    require(executor.execute("INSERT INTO items VALUES (2, 'book')").ok(), "second insert failed");
+    require(executor.execute("COMMIT").ok(), "commit failed");
+
+    result = executor.execute("SELECT * FROM items");
+    require(result.ok(), "select after commit failed");
+    require(result.rows.size() == 1, "committed row missing");
+    require(result.rows[0][1] == "book", "committed row wrong");
+
+    std::filesystem::remove_all(root);
+}
+
+void alter_table_constraints_execute() {
+    const std::filesystem::path root = test_root("query_executor_alter_constraints");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE categories (id INTEGER NOT NULL)").ok(), "create categories failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, category_id INTEGER NOT NULL, price NUMBER(4, 2) NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create items failed");
+    require(executor.execute("INSERT INTO categories VALUES (1)").ok(), "insert category failed");
+    require(executor.execute("INSERT INTO items VALUES (1, 1, 9.99, 'pen')").ok(), "insert item failed");
+
+    QueryResult result = executor.execute("ALTER TABLE items ADD UNIQUE (name)");
+    require(result.ok(), "alter add unique failed");
+    require(result.metadata.message == "constraint added", "alter add unique message wrong");
+
+    result = executor.execute("INSERT INTO items VALUES (2, 1, 4.50, 'pen')");
+    require(!result.ok(), "added unique constraint was not enforced");
+    require(result.error->message.find("unique") != std::string::npos, "unique error missing");
+
+    result = executor.execute("ALTER TABLE items ADD CHECK (price > 0)");
+    require(result.ok(), "alter add check failed");
+
+    result = executor.execute("INSERT INTO items VALUES (2, 1, -1.00, 'pencil')");
+    require(!result.ok(), "added check constraint was not enforced");
+    require(result.error->message.find("check") != std::string::npos, "check error missing");
+
+    result = executor.execute("ALTER TABLE items ADD FOREIGN KEY (category_id) REFERENCES categories(id)");
+    require(result.ok(), "alter add foreign key failed");
+
+    result = executor.execute("INSERT INTO items VALUES (2, 99, 1.00, 'pencil')");
+    require(!result.ok(), "added foreign key was not enforced");
+    require(result.error->message.find("foreign_key") != std::string::npos, "foreign key error missing");
+
+    result = executor.execute("ALTER TABLE items DROP CONSTRAINT 1");
+    require(result.ok(), "alter drop constraint failed");
+
+    result = executor.execute("INSERT INTO items VALUES (2, 1, 4.50, 'pen')");
+    require(result.ok(), "dropped unique constraint was still enforced");
+
+    std::filesystem::remove_all(root);
+}
+
+void alter_table_rejects_existing_bad_data() {
+    const std::filesystem::path root = test_root("query_executor_alter_bad_data");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create table failed");
+    require(executor.execute("INSERT INTO items VALUES (1, 'pen')").ok(), "insert 1 failed");
+    require(executor.execute("INSERT INTO items VALUES (2, 'pen')").ok(), "insert 2 failed");
+
+    QueryResult result = executor.execute("ALTER TABLE items ADD UNIQUE (name)");
+    require(!result.ok(), "alter unique accepted existing duplicates");
+    require(result.error->message.find("unique") != std::string::npos, "alter duplicate error missing");
+
+    std::filesystem::remove_all(root);
+}
+
+void alter_table_rolls_back_in_transaction() {
+    const std::filesystem::path root = test_root("query_executor_alter_rollback");
+    std::filesystem::remove_all(root);
+
+    QueryExecutor executor(root);
+    require(executor.execute("CREATE DATABASE db").ok(), "create database failed");
+    require(executor.execute("CREATE TABLE items (id INTEGER NOT NULL, name VARSTRING(16) NOT NULL)").ok(), "create table failed");
+    require(executor.execute("BEGIN").ok(), "begin failed");
+    require(executor.execute("ALTER TABLE items ADD UNIQUE (name)").ok(), "alter add unique failed");
+    require(executor.execute("ROLLBACK").ok(), "rollback failed");
+
+    require(executor.execute("INSERT INTO items VALUES (1, 'pen')").ok(), "insert 1 failed");
+    QueryResult result = executor.execute("INSERT INTO items VALUES (2, 'pen')");
+    require(result.ok(), "rolled back unique constraint was still enforced");
+
+    std::filesystem::remove_all(root);
+}
+
 void select_where_filters_rows() {
     const std::filesystem::path root = test_root("query_executor_select_where");
     std::filesystem::remove_all(root);
@@ -746,6 +858,10 @@ int main() {
     tests.push_back({"executor invalid query", invalid_query_returns_error});
     tests.push_back({"executor duplicate database", duplicate_database_returns_specific_error});
     tests.push_back({"executor duplicate table", duplicate_table_returns_specific_error});
+    tests.push_back({"executor transactions", transaction_commands_execute});
+    tests.push_back({"executor alter constraints", alter_table_constraints_execute});
+    tests.push_back({"executor alter bad data", alter_table_rejects_existing_bad_data});
+    tests.push_back({"executor alter rollback", alter_table_rolls_back_in_transaction});
     tests.push_back({"executor select where", select_where_filters_rows});
     tests.push_back({"executor delete where", delete_where_removes_matching_rows});
     tests.push_back({"executor update where", update_where_changes_matching_rows});

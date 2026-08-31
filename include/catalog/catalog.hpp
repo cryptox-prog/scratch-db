@@ -16,6 +16,7 @@ public:
     std::vector<std::string> list_databases() const;
 
     bool create_table(const std::string& database_name, const Schema& schema);
+    bool replace_table_schema(const std::string& database_name, const Schema& schema);
     bool table_exists(const std::string& database_name, const std::string& table_name) const;
     bool is_valid_new_table_name(
         const std::string& database_name,

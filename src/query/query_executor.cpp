@@ -1523,6 +1523,12 @@ QueryResult QueryExecutor::execute_parsed(const ParsedQuery& query) {
         }
         case QueryType::help:
             return help();
+        case QueryType::begin_transaction:
+            return begin_transaction();
+        case QueryType::commit_transaction:
+            return commit_transaction();
+        case QueryType::rollback_transaction:
+            return rollback_transaction();
         case QueryType::show_databases:
             return show_databases();
         case QueryType::show_tables:
@@ -1533,6 +1539,8 @@ QueryResult QueryExecutor::execute_parsed(const ParsedQuery& query) {
             return use_database(query.database_name);
         case QueryType::create_table:
             return create_table(query.table_name, query.columns, query.constraints);
+        case QueryType::alter_table:
+            return alter_table(query);
         case QueryType::describe_table:
             return describe_table(query.table_name);
         case QueryType::insert_row:
@@ -1597,6 +1605,39 @@ QueryResult QueryExecutor::use_database(const std::string& database_name) {
     return message_result("database changed");
 }
 
+QueryResult QueryExecutor::begin_transaction() {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", "BEGIN", current_command_, token_position(current_command_, "BEGIN"));
+    }
+    if (!db->begin_transaction()) {
+        return error_result("could not begin transaction", "BEGIN", current_command_, token_position(current_command_, "BEGIN"));
+    }
+    return message_result("transaction started");
+}
+
+QueryResult QueryExecutor::commit_transaction() {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", "COMMIT", current_command_, token_position(current_command_, "COMMIT"));
+    }
+    if (!db->commit_transaction()) {
+        return error_result("could not commit transaction", "COMMIT", current_command_, token_position(current_command_, "COMMIT"));
+    }
+    return message_result("transaction committed");
+}
+
+QueryResult QueryExecutor::rollback_transaction() {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", "ROLLBACK", current_command_, token_position(current_command_, "ROLLBACK"));
+    }
+    if (!db->rollback_transaction()) {
+        return error_result("could not rollback transaction", "ROLLBACK", current_command_, token_position(current_command_, "ROLLBACK"));
+    }
+    return message_result("transaction rolled back");
+}
+
 QueryResult QueryExecutor::show_databases() const {
     QueryResult result;
     result.columns = {{"database", "string"}};
@@ -1644,6 +1685,68 @@ QueryResult QueryExecutor::create_table(const std::string& table_name, const std
     }
 
     return message_result("table created");
+}
+
+QueryResult QueryExecutor::alter_table(const ParsedQuery& query) {
+    Database* db = database();
+    if (db == nullptr) {
+        return error_result("no database selected", query.table_name, current_command_, token_position(current_command_, query.table_name));
+    }
+
+    std::optional<Schema> schema = db->load_schema(query.table_name);
+    if (!schema.has_value()) {
+        return error_result("unknown table", query.table_name, current_command_, token_position(current_command_, query.table_name));
+    }
+
+    if (query.drop_constraint_id.has_value()) {
+        if (!db->drop_constraint(query.table_name, *query.drop_constraint_id)) {
+            return error_result("unknown constraint", std::to_string(*query.drop_constraint_id), current_command_, token_position(current_command_, std::to_string(*query.drop_constraint_id)));
+        }
+        return message_result("constraint dropped");
+    }
+
+    if (query.constraints.size() != 1) {
+        return error_result("expected constraint", query.table_name, current_command_, token_position(current_command_, query.table_name));
+    }
+
+    uint64_t next_constraint_id = 1;
+    std::vector<ConstraintDefinition> constraints = schema->constraints();
+    for (const ConstraintDefinition& constraint : constraints) {
+        if (constraint.id >= next_constraint_id) {
+            next_constraint_id = constraint.id + 1;
+        }
+    }
+
+    ConstraintDefinition new_constraint = query.constraints[0];
+    new_constraint.id = next_constraint_id;
+    constraints.push_back(new_constraint);
+
+    Schema candidate_schema = *schema;
+    try {
+        candidate_schema = Schema(schema->table_name(), schema->columns(), constraints);
+    } catch (const std::exception& error) {
+        return error_result(error.what(), query.table_name, current_command_, token_position(current_command_, query.table_name));
+    }
+    QueryResult constraint_error;
+    bool ok = db->scan_rows(query.table_name, [&candidate_schema, &query, db, &constraint_error](const TableRow& table_row) {
+        if (!row_satisfies_schema_constraints(query.table_name, candidate_schema, table_row.row.values(), db, table_row.record_id, constraint_error)) {
+            return false;
+        }
+        return true;
+    });
+    if (!ok) {
+        if (constraint_error.ok()) {
+            return error_result("constraint violation", query.table_name, current_command_, token_position(current_command_, query.table_name));
+        }
+        constraint_error.error->source = current_command_;
+        return constraint_error;
+    }
+
+    if (!db->add_constraint(query.table_name, query.constraints[0])) {
+        return error_result("could not add constraint", query.table_name, current_command_, token_position(current_command_, query.table_name));
+    }
+
+    return message_result("constraint added");
 }
 
 QueryResult QueryExecutor::describe_table(const std::string& table_name) {

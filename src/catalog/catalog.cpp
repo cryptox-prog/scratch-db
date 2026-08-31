@@ -311,6 +311,14 @@ bool Catalog::create_table(const std::string& database_name, const Schema& schem
     return true;
 }
 
+bool Catalog::replace_table_schema(const std::string& database_name, const Schema& schema) {
+    if (!database_exists(database_name) || !table_exists(database_name, schema.table_name()) || !schema.is_valid()) {
+        return false;
+    }
+
+    return write_schema_file(schema_file_path(database_name, schema.table_name()), schema);
+}
+
 /// @brief Check if table of given name already exists in a DB
 /// @param database_name The DB in which to look for the table
 /// @param table_name The table name to look for

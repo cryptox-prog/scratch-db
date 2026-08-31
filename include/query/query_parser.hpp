@@ -16,11 +16,15 @@ enum class QueryType {
     create_database,
     use_database,
     create_table,
+    alter_table,
     describe_table,
     insert_row,
     select_all,
     delete_row,
     update_row,
+    begin_transaction,
+    commit_transaction,
+    rollback_transaction,
     unknown,
 };
 
@@ -163,6 +167,7 @@ struct ParsedQuery {
     std::unique_ptr<ParsedQuery> derived_table;
     std::vector<Column> columns;
     std::vector<ConstraintDefinition> constraints;
+    std::optional<uint64_t> drop_constraint_id;
     std::vector<std::string> insert_columns;
     std::string values_text;
     std::vector<std::string> insert_value_rows;

@@ -66,6 +66,7 @@ private:
     QueryResult show_databases() const;
     QueryResult show_tables();
     QueryResult create_table(const std::string& table_name, const std::vector<Column>& columns, const std::vector<ConstraintDefinition>& constraints = {});
+    QueryResult alter_table(const ParsedQuery& query);
     QueryResult describe_table(const std::string& table_name);
     QueryResult insert_row(const std::string& table_name, const std::string& values_text);
     QueryResult insert_row(const std::string& table_name, const std::vector<std::string>& insert_columns, const std::string& values_text);
@@ -74,6 +75,9 @@ private:
     QueryResult delete_row(const std::string& table_name, const QueryConditionNode* condition);
     QueryResult update_row(const std::string& table_name, const std::string& values_text, const QueryConditionNode* condition);
     QueryResult update_row(const std::string& table_name, const std::vector<std::pair<std::string, std::string>>& assignments, const QueryConditionNode* condition);
+    QueryResult begin_transaction();
+    QueryResult commit_transaction();
+    QueryResult rollback_transaction();
 
     std::filesystem::path data_root_;
     std::string current_command_;
